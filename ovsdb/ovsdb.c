@@ -25,9 +25,13 @@
 #include "file.h"
 #include "monitor.h"
 #include "openvswitch/json.h"
+#include "openvswitch/poll-loop.h"
+#include "ovs-thread.h"
 #include "ovsdb-error.h"
 #include "ovsdb-parser.h"
 #include "ovsdb-types.h"
+#include "row.h"
+#include "seq.h"
 #include "simap.h"
 #include "storage.h"
 #include "table.h"
@@ -35,9 +39,12 @@
 #include "transaction.h"
 #include "transaction-forward.h"
 #include "trigger.h"
+#include "unixctl.h"
 
 #include "openvswitch/vlog.h"
 VLOG_DEFINE_THIS_MODULE(ovsdb);
+
+size_t n_weak_refs = 0;
 
 struct ovsdb_schema *
 ovsdb_schema_create(const char *name, const char *version, const char *cksum)
@@ -169,6 +176,39 @@ ovsdb_is_valid_version(const char *s)
 {
     struct ovsdb_version version;
     return ovsdb_parse_version(s, &version);
+}
+
+/* If set to 'true', database schema conversion operations in the storage
+ * may not contain the converted data, only the schema.  Currently affects
+ * only the clustered storage. */
+static bool use_no_data_conversion = true;
+
+static void
+ovsdb_no_data_conversion_enable(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                                const char *argv[] OVS_UNUSED,
+                                void *arg OVS_UNUSED)
+{
+    use_no_data_conversion = true;
+    unixctl_command_reply(conn, NULL);
+}
+
+void
+ovsdb_no_data_conversion_disable(void)
+{
+    if (!use_no_data_conversion) {
+        return;
+    }
+    use_no_data_conversion = false;
+    unixctl_command_register("ovsdb/file/no-data-conversion-enable", "",
+                             0, 0, ovsdb_no_data_conversion_enable, NULL);
+}
+
+/* Returns true if the database storage allows conversion records without
+ * data specified. */
+bool
+ovsdb_conversion_with_no_data_supported(const struct ovsdb *db)
+{
+    return use_no_data_conversion && ovsdb_storage_is_clustered(db->storage);
 }
 
 /* Returns the number of tables in 'schema''s root set. */
@@ -424,6 +464,8 @@ ovsdb_create(struct ovsdb_schema *schema, struct ovsdb_storage *storage)
 
     db->n_atoms = 0;
 
+    db->read_only = false;
+
     db->is_relay = false;
     ovs_list_init(&db->txn_forward_new);
     hmap_init(&db->txn_forward_sent);
@@ -460,6 +502,21 @@ ovsdb_destroy(struct ovsdb *db)
 {
     if (db) {
         struct shash_node *node;
+
+        /* Need to wait for compaction thread to finish the work. */
+        while (ovsdb_snapshot_in_progress(db)) {
+            ovsdb_snapshot_wait(db);
+            poll_block();
+        }
+        if (ovsdb_snapshot_ready(db)) {
+            struct ovsdb_error *error = ovsdb_snapshot(db, false);
+
+            if (error) {
+                char *s = ovsdb_error_to_string_free(error);
+                VLOG_INFO("%s: %s", db->name, s);
+                free(s);
+            }
+        }
 
         /* Close the log. */
         ovsdb_storage_close(db->storage);
@@ -527,6 +584,8 @@ ovsdb_get_memory_usage(const struct ovsdb *db, struct simap *usage)
     if (db->storage) {
         ovsdb_storage_get_memory_usage(db->storage, usage);
     }
+
+    simap_put(usage, "n-weak-refs", n_weak_refs);
 }
 
 struct ovsdb_table *
@@ -535,20 +594,122 @@ ovsdb_get_table(const struct ovsdb *db, const char *name)
     return shash_find_data(&db->tables, name);
 }
 
+static struct ovsdb *
+ovsdb_clone_data(const struct ovsdb *db)
+{
+    struct ovsdb *new = ovsdb_create(ovsdb_schema_clone(db->schema), NULL);
+
+    struct shash_node *node;
+    SHASH_FOR_EACH (node, &db->tables) {
+        struct ovsdb_table *table = node->data;
+        struct ovsdb_table *new_table = shash_find_data(&new->tables,
+                                                        node->name);
+        struct ovsdb_row *row, *new_row;
+
+        hmap_reserve(&new_table->rows, hmap_count(&table->rows));
+        HMAP_FOR_EACH (row, hmap_node, &table->rows) {
+            new_row = ovsdb_row_datum_clone(row);
+            hmap_insert(&new_table->rows, &new_row->hmap_node,
+                        ovsdb_row_hash(new_row));
+        }
+    }
+
+    return new;
+}
+
+static void *
+compaction_thread(void *aux)
+{
+    struct ovsdb_compaction_state *state = aux;
+    uint64_t start_time = time_msec();
+    struct json *data;
+
+    VLOG_DBG("%s: Compaction thread started.", state->db->name);
+    data = ovsdb_to_txn_json(state->db, "compacting database online",
+                             /* Do not allow shallow copies to avoid races. */
+                             false);
+    state->data = json_serialized_object_create(data);
+    json_destroy(data);
+
+    state->thread_time = time_msec() - start_time;
+
+    VLOG_DBG("%s: Compaction thread finished in %"PRIu64" ms.",
+             state->db->name, state->thread_time);
+    seq_change(state->done);
+    return NULL;
+}
+
+void
+ovsdb_snapshot_wait(struct ovsdb *db)
+{
+    if (db->snap_state) {
+        seq_wait(db->snap_state->done, db->snap_state->seqno);
+    }
+}
+
+bool
+ovsdb_snapshot_in_progress(struct ovsdb *db)
+{
+    return db->snap_state &&
+           seq_read(db->snap_state->done) == db->snap_state->seqno;
+}
+
+bool
+ovsdb_snapshot_ready(struct ovsdb *db)
+{
+    return db->snap_state &&
+           seq_read(db->snap_state->done) != db->snap_state->seqno;
+}
+
 struct ovsdb_error * OVS_WARN_UNUSED_RESULT
 ovsdb_snapshot(struct ovsdb *db, bool trim_memory OVS_UNUSED)
 {
-    if (!db->storage) {
+    if (!db->storage || ovsdb_snapshot_in_progress(db)) {
         return NULL;
     }
 
+    uint64_t applied_index = ovsdb_storage_get_applied_index(db->storage);
     uint64_t elapsed, start_time = time_msec();
-    struct json *schema = ovsdb_schema_to_json(db->schema);
-    struct json *data = ovsdb_to_txn_json(db, "compacting database online");
-    struct ovsdb_error *error = ovsdb_storage_store_snapshot(db->storage,
-                                                             schema, data);
-    json_destroy(schema);
-    json_destroy(data);
+    struct ovsdb_compaction_state *state;
+
+    if (!applied_index) {
+        /* Parallel compaction is not supported for standalone databases. */
+        state = xzalloc(sizeof *state);
+        state->data = ovsdb_to_txn_json(db,
+                                        "compacting database online", true);
+        state->schema = ovsdb_schema_to_json(db->schema);
+    } else if (ovsdb_snapshot_ready(db)) {
+        xpthread_join(db->snap_state->thread, NULL);
+
+        state = db->snap_state;
+        db->snap_state = NULL;
+
+        ovsdb_destroy(state->db);
+        seq_destroy(state->done);
+    } else {
+        /* Creating a thread. */
+        ovs_assert(!db->snap_state);
+        state = xzalloc(sizeof *state);
+
+        state->db = ovsdb_clone_data(db);
+        state->schema = ovsdb_schema_to_json(db->schema);
+        state->applied_index = applied_index;
+        state->done = seq_create();
+        state->seqno = seq_read(state->done);
+        state->thread = ovs_thread_create("compaction",
+                                          compaction_thread, state);
+        state->init_time = time_msec() - start_time;
+
+        db->snap_state = state;
+        return NULL;
+    }
+
+    struct ovsdb_error *error;
+
+    error = ovsdb_storage_store_snapshot(db->storage, state->schema,
+                                         state->data, state->applied_index);
+    json_destroy(state->schema);
+    json_destroy(state->data);
 
 #if HAVE_DECL_MALLOC_TRIM
     if (!error && trim_memory) {
@@ -557,10 +718,13 @@ ovsdb_snapshot(struct ovsdb *db, bool trim_memory OVS_UNUSED)
 #endif
 
     elapsed = time_msec() - start_time;
-    if (elapsed > 1000) {
-        VLOG_INFO("%s: Database compaction took %"PRIu64"ms",
-                  db->name, elapsed);
-    }
+    VLOG(elapsed > 1000 ? VLL_INFO : VLL_DBG,
+         "%s: Database compaction took %"PRIu64"ms "
+         "(init: %"PRIu64"ms, write: %"PRIu64"ms, thread: %"PRIu64"ms)",
+         db->name, elapsed + state->init_time,
+         state->init_time, elapsed, state->thread_time);
+
+    free(state);
     return error;
 }
 
@@ -586,6 +750,9 @@ ovsdb_replace(struct ovsdb *dst, struct ovsdb *src)
     shash_swap(&dst->tables, &src->tables);
 
     dst->rbac_role = ovsdb_get_table(dst, "RBAC_Role");
+
+    /* Get statistics from the new database. */
+    dst->n_atoms = src->n_atoms;
 
     ovsdb_destroy(src);
 }

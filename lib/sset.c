@@ -79,6 +79,8 @@ sset_clone(struct sset *set, const struct sset *orig)
     struct sset_node *node;
 
     sset_init(set);
+    hmap_reserve(&set->map, sset_count(orig));
+
     HMAP_FOR_EACH (node, hmap_node, &orig->map) {
         sset_add__(set, node->name, strlen(node->name),
                    node->hmap_node.hash);
@@ -259,6 +261,11 @@ char *
 sset_pop(struct sset *set)
 {
     const char *name = SSET_FIRST(set);
+
+    if (!name) {
+        return NULL;
+    }
+
     char *copy = xstrdup(name);
     sset_delete(set, SSET_NODE_FROM_NAME(name));
     return copy;

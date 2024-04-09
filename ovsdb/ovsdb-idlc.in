@@ -362,6 +362,8 @@ struct %(s)s *%(s)s_cursor_data(struct ovsdb_idl_cursor *);
 void %(s)s_init(struct %(s)s *);
 void %(s)s_delete(const struct %(s)s *);
 struct %(s)s *%(s)s_insert(struct ovsdb_idl_txn *);
+struct %(s)s *%(s)s_insert_persist_uuid(
+    struct ovsdb_idl_txn *txn, const struct uuid *uuid);
 
 /* Returns true if the tracked column referenced by 'enum %(s)s_column_id' of
  * the row referenced by 'struct %(s)s *' was updated since the last change
@@ -809,6 +811,19 @@ struct %(s)s *
     return %(s)s_cast(ovsdb_idl_txn_insert(txn, &%(p)stable_%(tl)s, NULL));
 }
 
+/* Inserts and returns a new row in the table "%(t)s" in the database
+ * with open transaction 'txn'.
+ *
+ * The new row is assigned the UUID specified in the 'uuid' parameter
+ * (which cannot be null).  ovsdb-server will try to assign the same
+ * UUID when 'txn' is committed. */
+struct %(s)s *
+%(s)s_insert_persist_uuid(struct ovsdb_idl_txn *txn, const struct uuid *uuid)
+{
+    return %(s)s_cast(ovsdb_idl_txn_insert_persist_uuid(
+        txn, &%(p)stable_%(tl)s, uuid));
+}
+
 bool
 %(s)s_is_updated(const struct %(s)s *row, enum %(s)s_column_id column)
 {
@@ -951,7 +966,10 @@ void
         'c': columnName,
         'args': ', '.join(['%(type)s%(name)s'
                            % m for m in members])})
+            print()
+            print("    datum.refcnt = NULL;")
             if type.n_min == 1 and type.n_max == 1:
+                print()
                 print("    union ovsdb_atom *key = xmalloc(sizeof *key);")
                 if type.value:
                     print("    union ovsdb_atom *value = xmalloc(sizeof *value);")
@@ -1004,10 +1022,6 @@ void
                 if type.value:
                     print("        " + type.value.copyCValue("datum.values[i].%s" % type.value.type.to_lvalue_string(), "%s[i]" % valueVar))
                 print("    }")
-                if type.value:
-                    valueType = type.value.toAtomicType()
-                else:
-                    valueType = "OVSDB_TYPE_VOID"
                 txn_write_func = "ovsdb_idl_txn_write"
             print("    %(f)s(&row->header_, &%(s)s_col_%(c)s, &datum);" \
                 % {'f': txn_write_func,
@@ -1035,6 +1049,7 @@ void
     datum->n = 1;
     datum->keys = xmalloc(datum->n * sizeof *datum->keys);
     datum->values = xmalloc(datum->n * sizeof *datum->values);
+    datum->refcnt = NULL;
 ''' % {'s': structName, 'c': columnName,'coltype':column.type.key.to_const_c_type(prefix),
         'valtype':column.type.value.to_const_c_type(prefix), 'S': structName.upper(),
         'C': columnName.upper(), 't': tableName})
@@ -1060,6 +1075,7 @@ void
     datum->n = 1;
     datum->keys = xmalloc(datum->n * sizeof *datum->keys);
     datum->values = NULL;
+    datum->refcnt = NULL;
 ''' % {'s': structName, 'c': columnName,'coltype':column.type.key.to_const_c_type(prefix),
         'valtype':column.type.value.to_const_c_type(prefix), 'S': structName.upper(),
         'C': columnName.upper(), 't': tableName})
@@ -1087,6 +1103,7 @@ void
     datum->n = 1;
     datum->keys = xmalloc(datum->n * sizeof *datum->values);
     datum->values = NULL;
+    datum->refcnt = NULL;
 ''' % {'s': structName, 'c': columnName,
         'valtype':column.type.key.to_const_c_type(prefix), 't': tableName})
                 print("    " + type.key.copyCValue("datum->keys[0].%s" % type.key.type.to_lvalue_string(), "new_value"))
@@ -1110,6 +1127,7 @@ void
     datum->n = 1;
     datum->keys = xmalloc(datum->n * sizeof *datum->values);
     datum->values = NULL;
+    datum->refcnt = NULL;
 ''' % {'s': structName, 'c': columnName,'coltype':column.type.key.to_const_c_type(prefix),
         'valtype':column.type.key.to_const_c_type(prefix), 'S': structName.upper(),
         'C': columnName.upper(), 't': tableName})
@@ -1179,8 +1197,11 @@ void
                  'args': ', '.join(['%(type)s%(name)s' % m for m in members])})
             print("{")
             print("    struct ovsdb_datum datum;")
+            print("")
+            print("    datum.refcnt = NULL;")
             free = []
             if type.n_min == 1 and type.n_max == 1:
+                print()
                 print("    union ovsdb_atom *key = xmalloc(sizeof *key);")
                 if type.value:
                     print("    union ovsdb_atom *value = xmalloc(sizeof *value);")
@@ -1228,12 +1249,8 @@ void
                 if type.value:
                     print("        " + type.value.copyCValue("datum.values[i].%s" % type.value.type.to_lvalue_string(), "%s[i]" % valueVar, refTable=False))
                 print("    }")
-                if type.value:
-                    valueType = type.value.toAtomicType()
-                else:
-                    valueType = "OVSDB_TYPE_VOID"
-                print("    ovsdb_datum_sort_unique(&datum, %s, %s);" % (
-                    type.key.toAtomicType(), valueType))
+                print("    ovsdb_datum_sort_unique(&datum, &%(s)s_col_%(c)s.type);" \
+                      % {'s': structName, 'c': columnName})
 
             print("""    ovsdb_idl_condition_add_clause(cond,
                           function,
@@ -1341,6 +1358,7 @@ struct %(s)s *
         datum->n = smap_count(%(c)s);
         datum->keys = xmalloc(datum->n * sizeof *datum->keys);
         datum->values = xmalloc(datum->n * sizeof *datum->values);
+        datum->refcnt = NULL;
 
         i = 0;
         SMAP_FOR_EACH (node, %(c)s) {
@@ -1348,7 +1366,7 @@ struct %(s)s *
             datum->values[i].s = ovsdb_atom_string_create(node->value);
             i++;
         }
-        ovsdb_datum_sort_unique(datum, OVSDB_TYPE_STRING, OVSDB_TYPE_STRING);
+        ovsdb_datum_sort_unique(datum, &%(s)s_col_%(c)s.type);
     } else {
         ovsdb_datum_init_empty(datum);
     }
@@ -1387,6 +1405,8 @@ struct %(s)s *
                  'args': ', '.join(['%(type)s%(name)s' % m for m in members])})
             print("{")
             print("    struct ovsdb_datum datum;")
+            print()
+            print("    datum.refcnt = NULL;")
             if type.n_min == 1 and type.n_max == 1:
                 print("    union ovsdb_atom *key = xmalloc(sizeof(union ovsdb_atom));")
                 if type.value:
@@ -1443,12 +1463,8 @@ struct %(s)s *
                 if type.value:
                     print("        " + type.value.copyCValue("datum.values[i].%s" % type.value.type.to_lvalue_string(), "%s[i]" % valueVar))
                 print("    }")
-                if type.value:
-                    valueType = type.value.toAtomicType()
-                else:
-                    valueType = "OVSDB_TYPE_VOID"
-                print("    ovsdb_datum_sort_unique(&datum, %s, %s);" % (
-                    type.key.toAtomicType(), valueType))
+                print("    ovsdb_datum_sort_unique(&datum, &%(s)s_col_%(c)s.type);"
+                      % {'s': structName, 'c': columnName})
                 txn_write_func = "ovsdb_idl_index_write"
             print("    %(f)s(CONST_CAST(struct ovsdb_idl_row *, &row->header_), &%(s)s_columns[ %(S)s_COL_%(C)s ], &datum, &%(p)stable_classes[%(P)sTABLE_%(T)s]);" \
                 % {'f': txn_write_func,

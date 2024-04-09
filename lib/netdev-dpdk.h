@@ -20,6 +20,7 @@
 #include <config.h>
 
 #include "openvswitch/compiler.h"
+#include "smap.h"
 
 struct dp_packet;
 struct netdev;
@@ -28,7 +29,7 @@ struct netdev;
 
 #include <rte_flow.h>
 
-void netdev_dpdk_register(void);
+void netdev_dpdk_register(const struct smap *);
 void free_dpdk_buf(struct dp_packet *);
 
 bool netdev_dpdk_flow_api_supported(struct netdev *);
@@ -50,6 +51,17 @@ netdev_dpdk_rte_flow_query_count(struct netdev *netdev,
                                  struct rte_flow_error *error);
 int
 netdev_dpdk_get_port_id(struct netdev *netdev);
+
+static inline void
+set_error(struct rte_flow_error *error, enum rte_flow_error_type type)
+{
+    if (!error) {
+        return;
+    }
+    error->type = type;
+    error->cause = NULL;
+    error->message = NULL;
+}
 
 #ifdef ALLOW_EXPERIMENTAL_API
 
@@ -77,17 +89,6 @@ int netdev_dpdk_rte_flow_tunnel_item_release(struct netdev *,
                                              struct rte_flow_error *);
 
 #else
-
-static inline void
-set_error(struct rte_flow_error *error, enum rte_flow_error_type type)
-{
-    if (!error) {
-        return;
-    }
-    error->type = type;
-    error->cause = NULL;
-    error->message = NULL;
-}
 
 static inline int
 netdev_dpdk_rte_flow_tunnel_decap_set(
@@ -149,11 +150,6 @@ netdev_dpdk_rte_flow_tunnel_item_release(
 
 #else
 
-static inline void
-netdev_dpdk_register(void)
-{
-    /* Nothing */
-}
 static inline void
 free_dpdk_buf(struct dp_packet *buf OVS_UNUSED)
 {

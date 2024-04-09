@@ -23,6 +23,7 @@
 #include "Flow.h"
 #include "Gre.h"
 #include "Jhash.h"
+#include "Meter.h"
 #include "Mpls.h"
 #include "NetProto.h"
 #include "Offload.h"
@@ -917,7 +918,7 @@ OvsOutputForwardingCtx(OvsForwardingContext *ovsFwdCtx)
                                           ovsFwdCtx->completionList,
                                           &ovsFwdCtx->layers, FALSE);
             if (status != NDIS_STATUS_SUCCESS) {
-                dropReason = L"Dropped due to resouces.";
+                dropReason = L"Dropped due to resources.";
                 goto dropit;
             }
         }
@@ -1513,6 +1514,8 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
     UINT16 *checkField = NULL;
     BOOLEAN l4Offload = FALSE;
     NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo;
+    UINT16  preNatPseudoChecksum = 0;
+    BOOLEAN preservePseudoChecksum = FALSE;
 
     ASSERT(layers->value != 0);
 
@@ -1548,6 +1551,11 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
      * case, we only update the TTL.
      */
      /*Only tx direction the checksum value will be reset to be PseudoChecksum*/
+    if (!isTx) {
+        preNatPseudoChecksum = IPPseudoChecksum(&ipHdr->saddr, &ipHdr->daddr,
+            tcpHdr ? IPPROTO_TCP : IPPROTO_UDP,
+            ntohs(ipHdr->tot_len) - ipHdr->ihl * 4);
+    }
 
     if (isSource) {
         addrField = &ipHdr->saddr;
@@ -1564,7 +1572,12 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
                         ((BOOLEAN)csumInfo.Receive.UdpChecksumSucceeded ||
                          (BOOLEAN)csumInfo.Receive.UdpChecksumFailed);
         }
-        if (isTx && l4Offload) {
+        if (!isTx && l4Offload) {
+            if (*checkField == preNatPseudoChecksum) {
+                preservePseudoChecksum = TRUE;
+            }
+        }
+        if (isTx && l4Offload || preservePseudoChecksum) {
             *checkField = IPPseudoChecksum(&newAddr, &ipHdr->daddr,
                 tcpHdr ? IPPROTO_TCP : IPPROTO_UDP,
                 ntohs(ipHdr->tot_len) - ipHdr->ihl * 4);
@@ -1584,8 +1597,13 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
                         ((BOOLEAN)csumInfo.Receive.UdpChecksumSucceeded ||
                          (BOOLEAN)csumInfo.Receive.UdpChecksumFailed);
         }
+        if (!isTx && l4Offload) {
+            if (*checkField == preNatPseudoChecksum) {
+                preservePseudoChecksum = TRUE;
+            }
+        }
 
-       if (isTx && l4Offload) {
+        if (isTx && l4Offload || preservePseudoChecksum) {
             *checkField = IPPseudoChecksum(&ipHdr->saddr, &newAddr,
                 tcpHdr ? IPPROTO_TCP : IPPROTO_UDP,
                 ntohs(ipHdr->tot_len) - ipHdr->ihl * 4);
@@ -1594,7 +1612,8 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
 
     if (*addrField != newAddr) {
         UINT32 oldAddr = *addrField;
-        if ((checkField && *checkField != 0) && (!l4Offload || !isTx)) {
+        if ((checkField && *checkField != 0) &&
+            (!l4Offload || (!isTx && !preservePseudoChecksum))) {
             /* Recompute total checksum. */
             *checkField = ChecksumUpdate32(*checkField, oldAddr,
                                             newAddr);
@@ -1608,7 +1627,8 @@ OvsUpdateAddressAndPort(OvsForwardingContext *ovsFwdCtx,
     }
 
     if (portField && *portField != newPort) {
-        if ((checkField) && (!l4Offload || !isTx)) {
+        if ((checkField) &&
+            (!l4Offload || (!isTx && !preservePseudoChecksum))) {
             /* Recompute total checksum. */
             *checkField = ChecksumUpdate16(*checkField, *portField,
                                            newPort);
@@ -2378,7 +2398,6 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
             }
 
             OvsExecuteHash(key, (const PNL_ATTR)a);
-
             break;
         }
 
@@ -2411,8 +2430,9 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                 goto dropit;
             } else if (oldNbl != ovsFwdCtx.curNbl) {
                 /*
-                 * OvsIpv4Reassemble consumes the original NBL and creates a
-                 * new one and assigns it to the curNbl of ovsFwdCtx.
+                 * OvsIpv4Reassemble/OvsIpv6Reassemble consumes the
+                 * original NBL and creates a new one and assigns
+                 * it to the curNbl of ovsFwdCtx.
                  */
                 OvsInitForwardingCtx(&ovsFwdCtx,
                                      ovsFwdCtx.switchContext,
@@ -2423,6 +2443,7 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                                      ovsFwdCtx.completionList,
                                      &ovsFwdCtx.layers, FALSE);
                 key->ipKey.nwFrag = OVS_FRAG_TYPE_NONE;
+                key->ipv6Key.nwFrag = OVS_FRAG_TYPE_NONE;
             }
             break;
         }
@@ -2465,6 +2486,7 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
         }
         case OVS_ACTION_ATTR_SET:
         {
+            OvsIPTunnelKey pre_tunKey = { 0 };
             if (ovsFwdCtx.destPortsSizeOut > 0 || ovsFwdCtx.tunnelTxNic != NULL
                 || ovsFwdCtx.tunnelRxNic != NULL) {
                 status = OvsOutputBeforeSetAction(&ovsFwdCtx);
@@ -2473,7 +2495,7 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                     goto dropit;
                 }
             }
-
+            RtlCopyMemory(&pre_tunKey, &key->tunKey, sizeof key->tunKey);
             status = OvsExecuteSetAction(&ovsFwdCtx, key, hash,
                                          (const PNL_ATTR)NlAttrGet
                                          ((const PNL_ATTR)a));
@@ -2481,6 +2503,33 @@ OvsDoExecuteActions(POVS_SWITCH_CONTEXT switchContext,
                 dropReason = L"OVS-set action failed";
                 goto dropit;
             }
+
+            if (!OvsIphIsZero(&(key->tunKey.dst)) &&
+                 key->l2.offset != OvsGetFlowIPL2Offset(&key->tunKey)) {
+                 key->l2.offset = OvsGetFlowIPL2Offset(&ovsFwdCtx.tunKey);
+            }
+            if (!OvsIphIsZero(&(pre_tunKey.dst))) {
+                 /*if pre_tunkey dst is not null in multiple IPV6 Geneve tunnels case,
+                  * for broadcast and multicast packet the flow pipeline will set different
+                  * tunnel setting on one flow. In such case, it needs to do layers update.
+                  * Elsewise it will meet BSOD issue but in IPV4 tunnel the BSOD will not
+                  * have construct case to make it happen.
+                  */
+                 status = OvsExtractLayers(ovsFwdCtx.curNbl, &ovsFwdCtx.layers);
+                 if (status != NDIS_STATUS_SUCCESS) {
+                     dropReason = L"OVS-set action ExtractLayers failed";
+                     goto dropit;
+                 }
+            }
+            break;
+        }
+        case OVS_ACTION_ATTR_METER: {
+            if (OvsMeterExecute(&ovsFwdCtx, NlAttrGetU32(a))) {
+                OVS_LOG_INFO("Drop packet");
+                dropReason = L"Ovs-meter exceed max rate";
+                goto dropit;
+            }
+
             break;
         }
         case OVS_ACTION_ATTR_SAMPLE:

@@ -13,15 +13,19 @@
 # limitations under the License.
 
 AC_PREREQ(2.63)
-AC_INIT(openvswitch, 2.17.90, bugs@openvswitch.org)
-AC_CONFIG_SRCDIR([datapath/datapath.c])
+AC_INIT(openvswitch, 3.3.90, bugs@openvswitch.org)
+AC_CONFIG_SRCDIR([vswitchd/ovs-vswitchd.c])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_TESTDIR([tests])
 AM_INIT_AUTOMAKE([tar-pax])
 
-AC_PROG_CC_C99
+# AC_PROG_CC doesn't try enabling C99 in autoconf 2.69 and below, but
+# AC_PROG_CC_C99 is deprecated in newer ones.  In autoconf 2.70+ both
+# will try enabling features up to C11.
+m4_version_prereq([2.70], [AC_PROG_CC], [AC_PROG_CC_C99])
+
 AM_PROG_CC_C_O
 AC_PROG_CXX
 AC_PROG_CPP
@@ -124,7 +128,6 @@ OVS_CHECK_BACKTRACE
 OVS_CHECK_PERF_EVENT
 OVS_CHECK_VALGRIND
 OVS_CHECK_SOCKET_LIBS
-OVS_CHECK_XENSERVER_VERSION
 OVS_CHECK_GROFF
 OVS_CHECK_TLS
 OVS_CHECK_ATOMIC_LIBS
@@ -181,9 +184,10 @@ OVS_ENABLE_OPTION([-Wno-null-pointer-arithmetic])
 OVS_ENABLE_OPTION([-Warray-bounds-pointer-arithmetic])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused], [HAVE_WNO_UNUSED])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused-parameter], [HAVE_WNO_UNUSED_PARAMETER])
-OVS_ENABLE_WERROR
+OVS_ENABLE_WERROR_TOP
 OVS_ENABLE_SPARSE
 OVS_CTAGS_IDENTIFIERS
+OVS_CHECK_ACTIONS_AUTOVALIDATOR
 OVS_CHECK_DPCLS_AUTOVALIDATOR
 OVS_CHECK_DPIF_AVX512_DEFAULT
 OVS_CHECK_MFEX_AUTOVALIDATOR
@@ -203,10 +207,6 @@ AC_SUBST([OVS_CFLAGS])
 AC_SUBST([OVS_LDFLAGS])
 
 AC_CONFIG_FILES(Makefile)
-AC_CONFIG_FILES(datapath/Makefile)
-AC_CONFIG_FILES(datapath/linux/Kbuild)
-AC_CONFIG_FILES(datapath/linux/Makefile)
-AC_CONFIG_FILES(datapath/linux/Makefile.main)
 AC_CONFIG_FILES(tests/atlocal)
 AC_CONFIG_FILES(lib/libopenvswitch.pc)
 AC_CONFIG_FILES(lib/libsflow.pc)

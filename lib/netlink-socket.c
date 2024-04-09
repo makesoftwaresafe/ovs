@@ -205,6 +205,15 @@ nl_sock_create(int protocol, struct nl_sock **sockp)
         }
     }
 
+    /* Strict checking only supported for NETLINK_ROUTE. */
+    if (protocol == NETLINK_ROUTE
+        && setsockopt(sock->fd, SOL_NETLINK, NETLINK_GET_STRICT_CHK,
+                      &one, sizeof one) < 0) {
+        VLOG_RL(&rl, errno == ENOPROTOOPT ? VLL_DBG : VLL_WARN,
+                "netlink: could not enable strict checking (%s)",
+                ovs_strerror(errno));
+    }
+
     retval = get_socket_rcvbuf(sock->fd);
     if (retval < 0) {
         retval = -retval;
@@ -1574,6 +1583,11 @@ do_lookup_genl_family(const char *name, struct nlattr **attrs,
         family_name = OVS_FLOW_FAMILY;
         family_version = OVS_FLOW_VERSION;
         family_attrmax = OVS_FLOW_ATTR_MAX;
+    } else if (!strcmp(name, OVS_METER_FAMILY)) {
+        family_id =  OVS_WIN_NL_METER_FAMILY_ID;
+        family_name = OVS_METER_FAMILY;
+        family_version = OVS_METER_VERSION;
+        family_attrmax = __OVS_METER_ATTR_MAX;
     } else if (!strcmp(name, OVS_WIN_NETDEV_FAMILY)) {
         family_id = OVS_WIN_NL_NETDEV_FAMILY_ID;
         family_name = OVS_WIN_NETDEV_FAMILY;

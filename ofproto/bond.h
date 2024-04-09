@@ -62,6 +62,9 @@ struct bond_settings {
                                    ovs run. */
     bool use_lb_output_action;  /* Use lb_output action. Only applicable for
                                    bond mode BALANCE TCP. */
+    bool all_members_active;    /* Accept multicast packets on secondary
+                                   interface. Only applicable for non-LACP
+                                   BALANCE SLB bond mode. */
 };
 
 /* Program startup. */
@@ -127,6 +130,9 @@ void bond_rebalance(struct bond *);
 */
 void bond_update_post_recirc_rules(struct bond *, uint32_t *recirc_id,
                                    uint32_t *hash_basis);
+
+void bond_get_recirc_id_and_hash_basis(struct bond *, uint32_t *recirc_id,
+                                       uint32_t *hash_basis);
 
 bool bond_use_lb_output_action(const struct bond *bond);
 

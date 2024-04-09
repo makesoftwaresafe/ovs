@@ -301,8 +301,21 @@ ovsdb_table_create(struct ovsdb_table_schema *ts)
         hmap_init(&table->indexes[i]);
     }
     hmap_init(&table->rows);
+    table->log = false;
 
     return table;
+}
+
+void
+ovsdb_table_logging_enable(struct ovsdb_table *table, bool enabled)
+{
+    table->log = enabled;
+}
+
+bool
+ovsdb_table_is_logging_enabled(struct ovsdb_table *table)
+{
+    return table->log;
 }
 
 void
@@ -355,7 +368,8 @@ ovsdb_table_execute_insert(struct ovsdb_txn *txn, const struct uuid *row_uuid,
 
     struct ovsdb_row *row = ovsdb_row_create(table);
 
-    struct ovsdb_error *error = ovsdb_row_from_json(row, json_row, NULL, NULL);
+    struct ovsdb_error *error = ovsdb_row_from_json(row, json_row,
+                                                    NULL, NULL, false);
     if (!error) {
         *ovsdb_row_get_uuid_rw(row) = *row_uuid;
         ovsdb_txn_row_insert(txn, row);
@@ -398,11 +412,13 @@ ovsdb_table_execute_update(struct ovsdb_txn *txn, const struct uuid *row_uuid,
     struct ovsdb_column_set columns = OVSDB_COLUMN_SET_INITIALIZER;
     struct ovsdb_row *update = ovsdb_row_create(table);
     struct ovsdb_error *error = ovsdb_row_from_json(update, json_row,
-                                                    NULL, &columns);
+                                                    NULL, &columns, xor);
 
     if (!error && (xor || !ovsdb_row_equal_columns(row, update, &columns))) {
-        error = ovsdb_row_update_columns(ovsdb_txn_row_modify(txn, row),
-                                         update, &columns, xor);
+        struct ovsdb_row *rw_row;
+
+        ovsdb_txn_row_modify(txn, row, &rw_row, NULL);
+        error = ovsdb_row_update_columns(rw_row, update, &columns, xor);
     }
 
     ovsdb_column_set_destroy(&columns);

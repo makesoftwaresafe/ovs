@@ -8,12 +8,12 @@ Open vSwitch
 
 .. image:: https://github.com/openvswitch/ovs/workflows/Build%20and%20Test/badge.svg
     :target: https://github.com/openvswitch/ovs/actions
-.. image:: https://travis-ci.org/openvswitch/ovs.png
-    :target: https://travis-ci.org/openvswitch/ovs
 .. image:: https://ci.appveyor.com/api/projects/status/github/openvswitch/ovs?branch=master&svg=true&retina=true
     :target: https://ci.appveyor.com/project/blp/ovs/history
 .. image:: https://api.cirrus-ci.com/github/openvswitch/ovs.svg
     :target: https://cirrus-ci.com/github/openvswitch/ovs
+.. image:: https://readthedocs.org/projects/openvswitch/badge/?version=latest
+    :target: https://docs.openvswitch.org/en/latest/
 
 What is Open vSwitch?
 ---------------------
@@ -27,7 +27,7 @@ Open vSwitch is well suited to function as a virtual switch in VM environments.
 In addition to exposing standard control and visibility interfaces to the
 virtual networking layer, it was designed to support distribution across
 multiple physical servers.  Open vSwitch supports multiple Linux-based
-virtualization technologies including Xen/XenServer, KVM, and VirtualBox.
+virtualization technologies including KVM, and VirtualBox.
 
 The bulk of the code is written in platform-independent C and is easily ported
 to other environments.  The current release of Open vSwitch supports the
@@ -37,13 +37,11 @@ following features:
 - NIC bonding with or without LACP on upstream switch
 - NetFlow, sFlow(R), and mirroring for increased visibility
 - QoS (Quality of Service) configuration, plus policing
-- Geneve, GRE, VXLAN, STT, and LISP tunneling
+- Geneve, GRE, VXLAN, STT, ERSPAN, GTP-U, SRv6, Bareudp, and LISP tunneling
 - 802.1ag connectivity fault management
 - OpenFlow 1.0 plus numerous extensions
 - Transactional configuration database with C and Python bindings
 - High-performance forwarding using a Linux kernel module
-
-The included Linux kernel module supports Linux 3.10 and up.
 
 Open vSwitch can also operate entirely in userspace without assistance from
 a kernel module.  This userspace implementation should be easier to port than
@@ -61,10 +59,8 @@ The main components of this distribution are:
 - ovsdb-server, a lightweight database server that ovs-vswitchd queries to
   obtain its configuration.
 - ovs-dpctl, a tool for configuring the switch kernel module.
-- Scripts and specs for building RPMs for Citrix XenServer and Red Hat
-  Enterprise Linux.  The XenServer RPMs allow Open vSwitch to be installed on a
-  Citrix XenServer host as a drop-in replacement for its switch, with
-  additional functionality.
+- Scripts and specs for building RPMs for Red Hat Enterprise Linux and
+  deb packages for Ubuntu/Debian.
 - ovs-vsctl, a utility for querying and updating the configuration of
   ovs-vswitchd.
 - ovs-appctl, a utility that sends commands to running Open vSwitch daemons.
@@ -122,9 +118,6 @@ The following files are licensed under the 3-clause BSD-license
     include/windows/netinet/icmp6.h
     include/windows/netinet/ip6.h
     lib/strsep.c
-
-Files under the xenserver directory are licensed on a file-by-file basis.
-Refer to each file for details.
 
 Files lib/sflow*.[ch] are licensed under the terms of either the
 Sun Industry Standards Source License 1.1, that is available at:

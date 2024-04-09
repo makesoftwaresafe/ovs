@@ -37,7 +37,9 @@ static bool x86_has_isa(uint32_t leaf, enum x86_reg reg, uint32_t bit)
 {
     uint32_t regs[4];
 
-    ovs_assert(__get_cpuid_max(leaf & X86_LEAF_MASK, NULL) >= leaf);
+    if (__get_cpuid_max(leaf & X86_LEAF_MASK, NULL) < leaf) {
+        return false;
+    }
 
     __cpuid_count(leaf, 0, regs[EAX], regs[EBX], regs[ECX], regs[EDX]);
     return (regs[reg] & ((uint32_t) 1 << bit)) != 0;
@@ -53,6 +55,7 @@ X86_ISA(X86_EXT_FEATURES_LEAF, EBX, 16, OVS_CPU_ISA_X86_AVX512F)
 X86_ISA(X86_EXT_FEATURES_LEAF, EBX, 30, OVS_CPU_ISA_X86_AVX512BW)
 X86_ISA(X86_EXT_FEATURES_LEAF, ECX,  1, OVS_CPU_ISA_X86_AVX512VBMI)
 X86_ISA(X86_EXT_FEATURES_LEAF, ECX, 14, OVS_CPU_ISA_X86_VPOPCNTDQ)
+X86_ISA(X86_EXT_FEATURES_LEAF, EBX, 31, OVS_CPU_ISA_X86_AVX512VL)
 #endif
 
 bool

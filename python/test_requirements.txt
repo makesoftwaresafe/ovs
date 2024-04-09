@@ -1,0 +1,6 @@
+netaddr
+pyftpdlib
+pyparsing
+pytest
+scapy
+tftpy

@@ -16,7 +16,7 @@ ovs_pyfiles = \
 	python/ovs/compat/sortedcontainers/sorteddict.py \
 	python/ovs/compat/sortedcontainers/sortedset.py \
 	python/ovs/daemon.py \
-	python/ovs/fcntl_win.py \
+	python/ovs/dns_resolve.py \
 	python/ovs/db/__init__.py \
 	python/ovs/db/custom_index.py \
 	python/ovs/db/data.py \
@@ -26,6 +26,17 @@ ovs_pyfiles = \
 	python/ovs/db/schema.py \
 	python/ovs/db/types.py \
 	python/ovs/fatal_signal.py \
+	python/ovs/fcntl_win.py \
+	python/ovs/flow/__init__.py \
+	python/ovs/flow/decoders.py \
+	python/ovs/flow/filter.py \
+	python/ovs/flow/flow.py \
+	python/ovs/flow/kv.py \
+	python/ovs/flow/list.py \
+	python/ovs/flow/odp.py \
+	python/ovs/flow/ofp.py \
+	python/ovs/flow/ofp_act.py \
+	python/ovs/flow/ofp_fields.py \
 	python/ovs/json.py \
 	python/ovs/jsonrpc.py \
 	python/ovs/ovsuuid.py \
@@ -42,32 +53,47 @@ ovs_pyfiles = \
 	python/ovs/version.py \
 	python/ovs/vlog.py \
 	python/ovs/winutils.py
+
+ovs_pytests = \
+	python/ovs/tests/test_decoders.py \
+	python/ovs/tests/test_dns_resolve.py \
+	python/ovs/tests/test_filter.py \
+	python/ovs/tests/test_kv.py \
+	python/ovs/tests/test_list.py \
+	python/ovs/tests/test_odp.py \
+	python/ovs/tests/test_ofp.py
+
 # These python files are used at build time but not runtime,
 # so they are not installed.
 EXTRA_DIST += \
-	python/build/__init__.py \
-	python/build/nroff.py \
-	python/build/soutil.py
+	python/ovs_build_helpers/__init__.py \
+	python/ovs_build_helpers/extract_ofp_fields.py \
+	python/ovs_build_helpers/nroff.py \
+	python/ovs_build_helpers/soutil.py
 
 # PyPI support.
 EXTRA_DIST += \
 	python/ovs/compat/sortedcontainers/LICENSE \
 	python/README.rst \
-	python/setup.py
+	python/setup.py \
+	python/test_requirements.txt
 
 # C extension support.
 EXTRA_DIST += python/ovs/_json.c
 
-PYFILES = $(ovs_pyfiles) python/ovs/dirs.py $(ovstest_pyfiles)
+PYFILES = $(ovs_pyfiles) python/ovs/dirs.py $(ovstest_pyfiles) $(ovs_pytests)
+
 EXTRA_DIST += $(PYFILES)
 PYCOV_CLEAN_FILES += $(PYFILES:.py=.py,cover)
 
 FLAKE8_PYFILES += \
 	$(filter-out python/ovs/compat/% python/ovs/dirs.py,$(PYFILES)) \
-	python/setup.py \
-	python/build/__init__.py \
-	python/build/nroff.py \
-	python/ovs/dirs.py.template
+	python/ovs_build_helpers/__init__.py \
+	python/ovs_build_helpers/extract_ofp_fields.py \
+	python/ovs_build_helpers/nroff.py \
+	python/ovs_build_helpers/soutil.py \
+	python/ovs/dirs.py.template \
+	python/setup.py
 
 nobase_pkgdata_DATA = $(ovs_pyfiles) $(ovstest_pyfiles)
 ovs-install-data-local:
@@ -86,11 +112,14 @@ ovs-install-data-local:
 	$(INSTALL_DATA) python/ovs/dirs.py.tmp $(DESTDIR)$(pkgdatadir)/python/ovs/dirs.py
 	rm python/ovs/dirs.py.tmp
 
+.PHONY: python-sdist
 python-sdist: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
-	(cd python/ && $(PYTHON3) setup.py sdist)
+	cd python/ && $(PYTHON3) -m build --sdist
 
-pypi-upload: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
-	(cd python/ && $(PYTHON3) setup.py sdist upload)
+.PHONY: pypi-upload
+pypi-upload: python-sdist
+	twine upload python/dist/ovs-$(VERSION).tar.gz
+
 install-data-local: ovs-install-data-local
 
 UNINSTALL_LOCAL += ovs-uninstall-local
@@ -117,3 +146,11 @@ $(srcdir)/python/ovs/dirs.py: python/ovs/dirs.py.template
 	mv $@.tmp $@
 EXTRA_DIST += python/ovs/dirs.py.template
 CLEANFILES += python/ovs/dirs.py
+
+EXTRA_DIST += python/TODO.rst
+
+$(srcdir)/python/ovs/flow/ofp_fields.py: $(srcdir)/build-aux/gen_ofp_field_decoders include/openvswitch/meta-flow.h
+	$(AM_V_GEN)$(run_python) $< $(srcdir)/include/openvswitch/meta-flow.h > $@.tmp
+	$(AM_V_at)mv $@.tmp $@
+EXTRA_DIST += python/ovs/flow/ofp_fields.py
+CLEANFILES += python/ovs/flow/ofp_fields.py

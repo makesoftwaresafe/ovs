@@ -90,7 +90,7 @@ need the following software:
   If libcap-ng is installed, then Open vSwitch will automatically build with
   support for it.
 
-- Python 3.4 or later.
+- Python 3.6 or later.
 
 - Unbound library, from http://www.unbound.net, is optional but recommended if
   you want to enable ovs-vswitchd and other utilities to use DNS names when
@@ -181,6 +181,10 @@ following to obtain better warnings:
   come from the "hacking" flake8 plugin. If it's not installed, the warnings
   just won't occur until it's run on a system with "hacking" installed.
 
+- the python packages listed in "python/test_requirements.txt" (compatible
+  with pip). If they are installed, the pytest-based Python unit tests will
+  be run.
+
 You may find the ovs-dev script found in ``utilities/ovs-dev.py`` useful.
 
 .. _general-install-reqs:
@@ -204,7 +208,7 @@ simply install and run Open vSwitch you require the following software:
   from iproute2 (part of all major distributions and available at
   https://wiki.linuxfoundation.org/networking/iproute2).
 
-- Python 3.4 or later.
+- Python 3.6 or later.
 
 On Linux you should ensure that ``/dev/urandom`` exists. To support TAP
 devices, you must also ensure that ``/dev/net/tun`` exists.
@@ -302,24 +306,6 @@ example::
 
     $ ./configure CFLAGS="-g -O2 -fsanitize=address -fno-omit-frame-pointer -fno-common"
 
-To build the Linux kernel module, so that you can run the kernel-based switch,
-pass the location of the kernel build directory on ``--with-linux``. For
-example, to build for a running instance of Linux::
-
-    $ ./configure --with-linux=/lib/modules/$(uname -r)/build
-
-.. note::
-  If ``--with-linux`` requests building for an unsupported version of Linux,
-  then ``configure`` will fail with an error message. Refer to the
-  :doc:`/faq/index` for advice in that case.
-
-If you wish to build the kernel module for an architecture other than the
-architecture of the machine used for the build, you may specify the kernel
-architecture string using the KARCH variable when invoking the configure
-script. For example, to build for MIPS with Linux::
-
-    $ ./configure --with-linux=/path/to/linux KARCH=mips
-
 If you plan to do much Open vSwitch development, you might want to add
 ``--enable-Werror``, which adds the ``-Werror`` option to the compiler command
 line, turning warnings into errors. That makes it impossible to miss warnings
@@ -358,6 +344,22 @@ you wish to link with jemalloc add it to LIBS::
 
     $ ./configure LIBS=-ljemalloc
 
+.. note::
+  Linking Open vSwitch with the jemalloc shared library may not work as
+  expected in certain operating system development environments. You can
+  override the automatic compiler decision to avoid possible linker issues by
+  passing ``-fno-lto`` or ``-fno-builtin`` flag since the jemalloc override
+  standard built-in memory allocation functions such as malloc, calloc, etc.
+  Both options can solve possible jemalloc linker issues with pros and cons for
+  each case, feel free to choose the path that appears best to you. Disabling
+  LTO flag example::
+
+      $ ./configure LIBS=-ljemalloc CFLAGS="-g -O2 -fno-lto"
+
+  Disabling built-in flag example::
+
+      $ ./configure LIBS=-ljemalloc CFLAGS="-g -O2 -fno-builtin"
+
 .. _general-building:
 
 Building
@@ -389,51 +391,6 @@ Building
    running system, by default under ``/usr/local``::
 
        $ make install
-
-5. If you built kernel modules, you may install them, e.g.::
-
-       $ make modules_install
-
-   It is possible that you already had a Open vSwitch kernel module installed
-   on your machine that came from upstream Linux (in a different directory). To
-   make sure that you load the Open vSwitch kernel module you built from this
-   repository, you should create a ``depmod.d`` file that prefers your newly
-   installed kernel modules over the kernel modules from upstream Linux. The
-   following snippet of code achieves the same::
-
-       $ config_file="/etc/depmod.d/openvswitch.conf"
-       $ for module in datapath/linux/*.ko; do
-         modname="$(basename ${module})"
-         echo "override ${modname%.ko} * extra" >> "$config_file"
-         echo "override ${modname%.ko} * weak-updates" >> "$config_file"
-         done
-       $ depmod -a
-
-   Finally, load the kernel modules that you need. e.g.::
-
-       $ /sbin/modprobe openvswitch
-
-   To verify that the modules have been loaded, run ``/sbin/lsmod`` and check
-   that openvswitch is listed::
-
-       $ /sbin/lsmod | grep openvswitch
-
-   .. note::
-     If the ``modprobe`` operation fails, look at the last few kernel log
-     messages (e.g. with ``dmesg | tail``). Generally, issues like this occur
-     when Open vSwitch is built for a kernel different from the one into which
-     you are trying to load it.  Run ``modinfo`` on ``openvswitch.ko`` and on a
-     module built for the running kernel, e.g.::
-
-         $ /sbin/modinfo openvswitch.ko
-         $ /sbin/modinfo /lib/modules/$(uname -r)/kernel/net/bridge/bridge.ko
-
-     Compare the "vermagic" lines output by the two commands.  If they differ,
-     then Open vSwitch was built for the wrong kernel.
-
-     If you decide to report a bug or ask a question related to module loading,
-     include the output from the ``dmesg`` and ``modinfo`` commands mentioned
-     above.
 
 .. _general-starting:
 
@@ -538,7 +495,7 @@ Start ovsdb-server using below command::
     $ docker run -itd --net=host --name=ovsdb-server \
       <docker_repo>:<tag> ovsdb-server
 
-Start ovs-vswitchd with priviledged mode as it needs to load kernel module in
+Start ovs-vswitchd with privileged mode as it needs to load kernel module in
 host using below command::
 
     $ docker run -itd --net=host --name=ovs-vswitchd \
@@ -657,8 +614,8 @@ userspace flows using the ovs-ofctl utility and also uses the
 ``other_config:flow-restore-wait`` column to keep the traffic downtime to the
 minimum. The ovs-ctl utility's ``force-reload-kmod`` function does all of the
 above, but also replaces the old kernel module with the new one. Open vSwitch
-startup scripts for Debian, XenServer and RHEL use ovs-ctl's functions and it
-is recommended that these functions be used for other software platforms too.
+startup scripts for Debian and RHEL use ovs-ctl's functions and it is
+recommended that these functions be used for other software platforms too.
 
 Reporting Bugs
 --------------

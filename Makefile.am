@@ -7,7 +7,6 @@
 
 AUTOMAKE_OPTIONS = foreign subdir-objects
 ACLOCAL_AMFLAGS = -I m4
-SUBDIRS = datapath
 
 AM_CPPFLAGS = $(SSL_CFLAGS)
 AM_LDFLAGS = $(SSL_LDFLAGS)
@@ -76,13 +75,18 @@ EXTRA_DIST = \
 	MAINTAINERS.rst \
 	README.rst \
 	NOTICE \
+	.ci/dpdk-build.sh \
+	.ci/dpdk-prepare.sh \
 	.ci/linux-build.sh \
 	.ci/linux-prepare.sh \
 	.ci/osx-build.sh \
 	.ci/osx-prepare.sh \
+	.ci/windows-build.sh \
+	.ci/windows-prepare.sh \
 	.cirrus.yml \
+	.editorconfig \
 	.github/workflows/build-and-test.yml \
-	.travis.yml \
+	.readthedocs.yaml \
 	appveyor.yml \
 	boot.sh \
 	poc/builders/Vagrantfile \
@@ -121,6 +125,7 @@ OVSIDL_BUILT =
 pkgdata_DATA =
 sbin_SCRIPTS =
 scripts_SCRIPTS =
+usdt_SCRIPTS =
 completion_SCRIPTS =
 scripts_DATA =
 SUFFIXES =
@@ -134,6 +139,7 @@ C ?= 1
 endif
 
 scriptsdir = $(pkgdatadir)/scripts
+usdtdir = $(pkgdatadir)/scripts/usdt
 completiondir = $(sysconfdir)/bash_completion.d
 pkgconfigdir = $(libdir)/pkgconfig
 
@@ -198,25 +204,22 @@ CLEAN_LOCAL += clean-pycov
 ALL_LOCAL += dist-hook-git
 dist-hook-git: distfiles
 	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1; then \
-	  (cd datapath && $(MAKE) distfiles); \
-	  (cat distfiles; sed 's|^|datapath/|' datapath/distfiles) | \
-	    LC_ALL=C sort -u > all-distfiles; \
 	  (cd $(srcdir) && git ls-files) | grep -v '\.gitignore$$' | \
 	    grep -v '\.gitattributes$$' | \
 	    LC_ALL=C sort -u > all-gitfiles; \
-	  LC_ALL=C comm -1 -3 all-distfiles all-gitfiles > missing-distfiles; \
+	  LC_ALL=C comm -1 -3 distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then \
 	    echo "The following files are in git but not the distribution:"; \
 	    cat missing-distfiles; \
 	    exit 1; \
 	  fi; \
-	  if LC_ALL=C grep '\.gitignore$$' all-distfiles; then \
+	  if LC_ALL=C grep '\.gitignore$$' distfiles; then \
 	    echo "See above for list of files that are distributed but"; \
 	    echo "should not be."; \
 	    exit 1; \
 	  fi \
 	fi
-CLEANFILES += all-distfiles all-gitfiles missing-distfiles
+CLEANFILES += all-gitfiles missing-distfiles
 # The following is based on commands for the Automake "distdir" target.
 distfiles: Makefile
 	@srcdirstrip=`echo "$(srcdir)" | sed 's/[].[^$$\\*]/\\\\&/g'`; \
@@ -235,7 +238,7 @@ config-h-check:
 	@cd $(srcdir); \
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  git --no-pager grep -L '#include <config\.h>' `git ls-files | grep '\.c$$' | \
-	    grep -vE '^datapath|^lib/sflow|^third-party|^datapath-windows|^python'`; \
+	    grep -vE '^datapath-windows|^lib/sflow|^python|^third-party'`; \
 	then \
 	  echo "See above for list of violations of the rule that"; \
 	  echo "every C source file must #include <config.h>."; \
@@ -256,7 +259,7 @@ printf-check:
 	@cd $(srcdir); \
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  git --no-pager grep -n -E -e '%[-+ #0-9.*]*([ztj]|hh)' --and --not -e 'ovs_scan' `git ls-files | grep '\.[ch]$$' | \
-	    grep -vE '^datapath|^lib/sflow|^third-party'`; \
+	    grep -vE '^datapath-windows|^lib/sflow|^third-party'`; \
 	then \
 	  echo "See above for list of violations of the rule that"; \
 	  echo "'z', 't', 'j', 'hh' printf() type modifiers are"; \
@@ -299,7 +302,7 @@ check-endian:
 	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
 	  (cd $(srcdir) && git --no-pager grep -l -E \
 	   -e 'BIG_ENDIAN|LITTLE_ENDIAN' --and --not -e 'BYTE_ORDER' | \
-	  $(EGREP) -v '^datapath/|^include/sparse/rte_'); \
+	  $(EGREP) -v '^include/sparse/rte_'); \
 	then \
 	  echo "See above for list of files that misuse LITTLE""_ENDIAN"; \
 	  echo "or BIG""_ENDIAN.  Please use WORDS_BIGENDIAN instead."; \
@@ -339,7 +342,7 @@ thread-safety-check:
 	if test -e .git && (git --version) >/dev/null 2>&1 && \
 	  grep -n -f build-aux/thread-safety-forbidden \
 	    `git ls-files | grep '\.[ch]$$' \
-	      | $(EGREP) -v '^datapath|^lib/sflow|^third-party'` /dev/null \
+	      | $(EGREP) -v '^datapath-windows|^lib/sflow|^third-party'` /dev/null \
 	      | $(EGREP) -v ':[ 	]*/?\*'; \
 	then \
 	  echo "See above for list of calls to functions that are"; \
@@ -368,7 +371,7 @@ ALL_LOCAL += manpage-check
 manpage-check: $(man_MANS) $(dist_man_MANS) $(noinst_man_MANS)
 	@error=false; \
 	for manpage in $?; do \
-	  LANG=en_US.UTF-8 groff -w mac -w delim -w escape -w input -w missing -w tab -T utf8 -man -p -z $$manpage >$@.tmp 2>&1; \
+	  LANG=en_US.UTF-8 groff -t -w mac -w delim -w escape -w input -w missing -w tab -T utf8 -man -p -z $$manpage >$@.tmp 2>&1; \
 	  if grep warning: $@.tmp; then error=:; fi; \
 	  rm -f $@.tmp; \
 	done; \
@@ -391,6 +394,7 @@ ALL_LOCAL += flake8-check
 #   E128 continuation line under-indented for visual indent
 #   E129 visually indented line with same indent as next logical line
 #   E131 continuation line unaligned for hanging indent
+#   E203 whitespace before ':'
 #   E722 do not use bare except, specify exception instead
 #   W503 line break before binary operator
 #   W504 line break after binary operator
@@ -403,7 +407,7 @@ ALL_LOCAL += flake8-check
 #   H233 Python 3.x incompatible use of print operator
 #   H238 old style class declaration, use new style (inherit from `object`)
 FLAKE8_SELECT = H231,H232,H233,H238
-FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,E722,W503,W504,F811,D,H,I
+FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,E203,E722,W503,W504,F811,D,H,I
 flake8-check: $(FLAKE8_PYFILES)
 	$(FLAKE8_WERROR)$(AM_V_GEN) \
 	  src='$^' && \
@@ -414,7 +418,7 @@ endif
 CLEANFILES += flake8-check
 
 -include manpages.mk
-manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/build/soutil.py
+manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/ovs_build_helpers/soutil.py
 	@PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON3) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
 	@if cmp -s $(@F).tmp $@; then \
 	  touch $@; \
@@ -468,11 +472,6 @@ install-data-local: $(INSTALL_DATA_LOCAL)
 uninstall-local: $(UNINSTALL_LOCAL)
 .PHONY: $(DIST_HOOKS) $(CLEAN_LOCAL) $(INSTALL_DATA_LOCAL) $(UNINSTALL_LOCAL)
 
-modules_install:
-if LINUX_ENABLED
-	cd datapath/linux && $(MAKE) modules_install
-endif
-
 dist-docs:
 	VERSION=$(VERSION) MAKE='$(MAKE)' $(srcdir)/build-aux/dist-docs $(srcdir) $(docs)
 .PHONY: dist-docs
@@ -490,7 +489,6 @@ include ipsec/automake.mk
 include vswitchd/automake.mk
 include ovsdb/automake.mk
 include rhel/automake.mk
-include xenserver/automake.mk
 include python/automake.mk
 include tutorial/automake.mk
 include vtep/automake.mk

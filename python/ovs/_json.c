@@ -2,10 +2,6 @@
 #include <openvswitch/json.h>
 #include "structmember.h"
 
-#if PY_MAJOR_VERSION >= 3
-#define IS_PY3K
-#endif
-
 typedef struct {
     PyObject_HEAD
     struct json_parser *_parser;
@@ -54,7 +50,7 @@ Parser_feed(json_ParserObject * self, PyObject * args)
     Py_ssize_t input_sz;
     PyObject *input;
     size_t rd;
-    char *input_str;
+    const char *input_str;
 
     if (self->_parser == NULL) {
         return NULL;
@@ -63,21 +59,13 @@ Parser_feed(json_ParserObject * self, PyObject * args)
     if (!PyArg_UnpackTuple(args, "input", 1, 1, &input)) {
         return NULL;
     }
-#ifdef IS_PY3K
     if ((input_str = PyUnicode_AsUTF8AndSize(input, &input_sz)) == NULL) {
-#else
-    if (PyString_AsStringAndSize(input, &input_str, &input_sz) < 0) {
-#endif
         return NULL;
     }
 
     rd = json_parser_feed(self->_parser, input_str, (size_t) input_sz);
 
-#ifdef IS_PY3K
     return PyLong_FromSize_t(rd);
-#else
-    return PyInt_FromSize_t(rd);
-#endif
 }
 
 static PyObject *
@@ -123,7 +111,7 @@ json_to_python(struct json *json)
             return dict;
         }
     case JSON_ARRAY:{
-            int i;
+            size_t i;
             PyObject *arr = PyList_New(json->array.n);
 
             if (arr == NULL) {
@@ -144,11 +132,7 @@ json_to_python(struct json *json)
             return PyFloat_FromDouble(json->real);
         } /* fall through to treat 0 as int */
     case JSON_INTEGER:
-#ifdef IS_PY3K
         return PyLong_FromLong((long) json->integer);
-#else
-        return PyInt_FromLong((long) json->integer);
-#endif
 
     case JSON_STRING:
         return PyUnicode_FromString(json->string);
@@ -186,84 +170,42 @@ static PyMethodDef Parser_methods[] = {
 
 static PyTypeObject json_ParserType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-        "ovs._json.Parser",     /* tp_name */
-    sizeof (json_ParserObject), /* tp_basicsize */
-    0,                          /* tp_itemsize */
-    (destructor) Parser_dealloc,        /* tp_dealloc */
-    0,                          /* tp_print */
-    0,                          /* tp_getattr */
-    0,                          /* tp_setattr */
-    0,                          /* tp_compare */
-    0,                          /* tp_repr */
-    0,                          /* tp_as_number */
-    0,                          /* tp_as_sequence */
-    0,                          /* tp_as_mapping */
-    0,                          /* tp_hash */
-    0,                          /* tp_call */
-    0,                          /* tp_str */
-    0,                          /* tp_getattro */
-    0,                          /* tp_setattro */
-    0,                          /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,   /* tp_flags */
-    "Parser objects",           /* tp_doc */
-    0,                          /* tp_traverse */
-    0,                          /* tp_clear */
-    0,                          /* tp_richcompare */
-    0,                          /* tp_weaklistoffset */
-    0,                          /* tp_iter */
-    0,                          /* tp_iternext */
-    Parser_methods,             /* tp_methods */
-    0,                          /* tp_members */
-    0,                          /* tp_getset */
-    0,                          /* tp_base */
-    0,                          /* tp_dict */
-    0,                          /* tp_descr_get */
-    0,                          /* tp_descr_set */
-    0,                          /* tp_dictoffset */
-    0,                          /* tp_init */
-    0,                          /* tp_alloc */
-    Parser_new,                 /* tp_new */
+    .tp_name = "ovs._json.Parser",
+    .tp_doc = "Parser objects",
+    .tp_basicsize = sizeof(json_ParserObject),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor) Parser_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_methods = Parser_methods,
+    .tp_new = Parser_new,
 };
 
-#ifdef IS_PY3K
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
-    "ovs._json",                /* m_name */
-    "OVS JSON Parser module",   /* m_doc */
-    0,                          /* m_size */
-    0,                          /* m_methods */
-    0,                          /* m_slots */
-    0,                          /* m_traverse */
-    0,                          /* m_clear */
-    0,                          /* m_free */
+    .m_name = "ovs._json",
+    .m_doc = "OVS JSON Parser module",
+    .m_size = 0,
 };
 
-#define INITERROR return NULL
-#else /* !IS_PY3K */
-#define INITERROR return
-#endif
-
 PyMODINIT_FUNC
-#ifdef IS_PY3K
 PyInit__json(void)
-#else
-init_json(void)
-#endif
 {
     PyObject *m;
 
     if (PyType_Ready(&json_ParserType) < 0) {
-        INITERROR;
+        return NULL;
     }
-#ifdef IS_PY3K
+
     m = PyModule_Create(&moduledef);
-#else
-    m = Py_InitModule3("ovs._json", NULL, "OVS JSON Parser module");
-#endif
+    if (!m) {
+        return NULL;
+    }
 
     Py_INCREF(&json_ParserType);
-    PyModule_AddObject(m, "Parser", (PyObject *) & json_ParserType);
-#ifdef IS_PY3K
+    if (PyModule_AddObject(m, "Parser", (PyObject *) &json_ParserType) < 0) {
+        Py_DECREF(&json_ParserType);
+        Py_DECREF(m);
+        return NULL;
+    }
     return m;
-#endif
 }

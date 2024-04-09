@@ -21,7 +21,6 @@ DOC_SOURCE = \
 	Documentation/intro/install/rhel.rst \
 	Documentation/intro/install/userspace.rst \
 	Documentation/intro/install/windows.rst \
-	Documentation/intro/install/xenserver.rst \
 	Documentation/tutorials/index.rst \
 	Documentation/tutorials/faucet.rst \
 	Documentation/tutorials/ovs-advanced.rst \
@@ -58,6 +57,7 @@ DOC_SOURCE = \
 	Documentation/topics/record-replay.rst \
 	Documentation/topics/tracing.rst \
 	Documentation/topics/usdt-probes.rst \
+	Documentation/topics/userspace-checksum-offloading.rst \
 	Documentation/topics/userspace-tso.rst \
 	Documentation/topics/userspace-tx-steering.rst \
 	Documentation/topics/windows.rst \
@@ -79,6 +79,7 @@ DOC_SOURCE = \
 	Documentation/howto/vlan.png \
 	Documentation/howto/vlan.rst \
 	Documentation/howto/vtep.rst \
+	Documentation/howto/tc-offload.rst \
 	Documentation/ref/index.rst \
 	Documentation/faq/index.rst \
 	Documentation/faq/configuration.rst \
@@ -108,6 +109,7 @@ DOC_SOURCE = \
 	Documentation/internals/security.rst \
 	Documentation/internals/contributing/index.rst \
 	Documentation/internals/contributing/backporting-patches.rst \
+	Documentation/internals/contributing/inclusive-language.rst \
 	Documentation/internals/contributing/coding-style.rst \
 	Documentation/internals/contributing/coding-style-windows.rst \
 	Documentation/internals/contributing/documentation-style.rst \

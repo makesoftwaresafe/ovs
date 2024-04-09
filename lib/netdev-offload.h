@@ -20,8 +20,10 @@
 
 #include "openvswitch/netdev.h"
 #include "openvswitch/types.h"
+#include "ovs-atomic.h"
 #include "ovs-rcu.h"
 #include "ovs-thread.h"
+#include "openvswitch/ofp-meter.h"
 #include "packets.h"
 #include "flow.h"
 
@@ -45,6 +47,7 @@ struct ovs_action_push_tnl;
 /* Offload-capable (HW) netdev information */
 struct netdev_hw_info {
     bool oor;		/* Out of Offload Resources ? */
+    atomic_bool miss_api_supported;  /* hw_miss_packet_recover() supported.*/
     int offload_count;  /* Pending (non-offloaded) flow count */
     int pending_count;  /* Offloaded flow count */
     OVSRCU_TYPE(void *) offload_data; /* Offload metadata. */
@@ -65,14 +68,11 @@ struct netdev_flow_dump {
 
 /* Flow offloading. */
 struct offload_info {
-    ovs_be16 tp_dst_port; /* Destination port for tunnel in SET action */
-    uint8_t tunnel_csum_on; /* Tunnel header with checksum */
-
     bool recirc_id_shared_with_tc;  /* Indicates whever tc chains will be in
                                      * sync with datapath recirc ids. */
 
     /*
-     * The flow mark id assigened to the flow. If any pkts hit the flow,
+     * The flow mark id assigned to the flow. If any pkts hit the flow,
      * it will be in the pkt meta data.
      */
     uint32_t flow_mark;
@@ -157,6 +157,10 @@ int netdev_ports_flow_get(const char *dpif_type, struct match *match,
                           struct ofpbuf *buf);
 int netdev_ports_get_n_flows(const char *dpif_type,
                              odp_port_t port_no, uint64_t *n_flows);
+
+void meter_offload_set(ofproto_meter_id, struct ofputil_meter_config *);
+int meter_offload_get(ofproto_meter_id, struct ofputil_meter_stats *);
+int meter_offload_del(ofproto_meter_id, struct ofputil_meter_stats *);
 
 #ifdef  __cplusplus
 }

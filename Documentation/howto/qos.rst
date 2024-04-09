@@ -59,10 +59,10 @@ is participating in an OVS bridge, no IP address can be assigned on `eth0`.
 
 The second host, named Measurement Host, can be any host capable of measuring
 throughput from a VM. For this guide, we use `netperf
-<http://www.netperf.org>`__, a free tool for testing the rate at which one host
-can send to another. The Measurement Host has only a single NIC, `eth0`, which
-is connected to the Data Network. `eth0` has an IP address that can reach any
-VM on `host1`.
+<https://hewlettpackard.github.io/netperf>`__, a free tool for testing the rate
+at which one host can send to another. The Measurement Host has only a single
+NIC, `eth0`, which is connected to the Data Network. `eth0` has an IP address
+that can reach any VM on `host1`.
 
 Two VMs
 ~~~~~~~
@@ -72,8 +72,7 @@ Both VMs (`vm1` and `vm2`) run on `host1`.
 Each VM has a single interface that appears as a Linux device (e.g., ``tap0``) on the physical host.
 
 .. note::
-  For Xen/XenServer, VM interfaces appears as Linux devices with names like
-  ``vif1.0``. Other Linux systems may present these interfaces as ``vnet0``,
+  VM interfaces may appear as Linux devices with names like ``vnet0``,
   ``vnet1``, etc.
 
 Configuration Steps

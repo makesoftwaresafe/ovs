@@ -29,10 +29,12 @@
 #include "openvswitch/vlog.h"
 #include "ovsdb-error.h"
 #include "ovsdb.h"
+#include "ovs-thread.h"
 #include "row.h"
 #include "storage.h"
 #include "table.h"
 #include "uuid.h"
+#include "util.h"
 
 VLOG_DEFINE_THIS_MODULE(transaction);
 
@@ -41,7 +43,7 @@ struct ovsdb_txn {
     struct ovs_list txn_tables; /* Contains "struct ovsdb_txn_table"s. */
     struct ds comment;
     struct uuid txnid; /* For clustered and relay modes.  It is the eid. */
-    size_t n_atoms;    /* Number of atoms in all transaction rows. */
+    size_t n_atoms;    /* Number of atoms in all changed transaction rows. */
     ssize_t n_atoms_diff;  /* Difference between number of added and
                             * removed atoms. */
 };
@@ -70,6 +72,8 @@ struct ovsdb_txn_table {
  *        'new'.
  *
  *      - A row modified by a transaction will have non-null 'old' and 'new'.
+ *        It may have non-null 'diff' as well in this case, but it is not
+ *        necessary.
  *
  *      - 'old' and 'new' both null indicates that a row was added then deleted
  *        within a single transaction.  Most of the time we instead delete the
@@ -81,6 +85,7 @@ struct ovsdb_txn_row {
     struct hmap_node hmap_node; /* In ovsdb_txn_table's txn_rows hmap. */
     struct ovsdb_row *old;      /* The old row. */
     struct ovsdb_row *new;      /* The new row. */
+    struct ovsdb_row *diff;     /* The difference between old and new. */
     size_t n_refs;              /* Number of remaining references. */
 
     /* These members are the same as the corresponding members of 'old' or
@@ -102,6 +107,7 @@ struct ovsdb_txn_row {
 static struct ovsdb_error * OVS_WARN_UNUSED_RESULT
 delete_garbage_row(struct ovsdb_txn *txn, struct ovsdb_txn_row *r);
 static void ovsdb_txn_row_prefree(struct ovsdb_txn_row *);
+static void ovsdb_txn_row_log(const struct ovsdb_txn_row *);
 static struct ovsdb_error * OVS_WARN_UNUSED_RESULT
 for_each_txn_row(struct ovsdb_txn *txn,
                       struct ovsdb_error *(*)(struct ovsdb_txn *,
@@ -110,6 +116,11 @@ for_each_txn_row(struct ovsdb_txn *txn,
 /* Used by for_each_txn_row() to track tables and rows that have been
  * processed.  */
 static unsigned int serial;
+
+/* Used by ovsdb_txn_row_log() to avoid reallocating dynamic strings
+ * every time a row operation is logged.
+ */
+DEFINE_STATIC_PER_THREAD_DATA(struct ds, row_log_str, DS_EMPTY_INITIALIZER);
 
 struct ovsdb_txn *
 ovsdb_txn_create(struct ovsdb *db)
@@ -147,6 +158,7 @@ ovsdb_txn_row_abort(struct ovsdb_txn *txn OVS_UNUSED,
 {
     struct ovsdb_row *old = txn_row->old;
     struct ovsdb_row *new = txn_row->new;
+    struct ovsdb_row *diff = txn_row->diff;
 
     ovsdb_txn_row_prefree(txn_row);
     if (!old) {
@@ -176,6 +188,7 @@ ovsdb_txn_row_abort(struct ovsdb_txn *txn OVS_UNUSED,
     }
 
     ovsdb_row_destroy(new);
+    ovsdb_row_destroy(diff);
     free(txn_row);
 
     return NULL;
@@ -242,7 +255,10 @@ find_or_make_txn_row(struct ovsdb_txn *txn, const struct ovsdb_table *table,
     if (!txn_row) {
         const struct ovsdb_row *row = ovsdb_table_get_row(table, uuid);
         if (row) {
-            txn_row = ovsdb_txn_row_modify(txn, row)->txn_row;
+            struct ovsdb_row *rw_row;
+
+            ovsdb_txn_row_modify(txn, row, &rw_row, NULL);
+            txn_row = rw_row->txn_row;
         }
     }
     return txn_row;
@@ -314,7 +330,8 @@ update_row_ref_count(struct ovsdb_txn *txn, struct ovsdb_txn_row *r)
         const struct ovsdb_column *column = node->data;
         struct ovsdb_error *error;
 
-        if (bitmap_is_set(r->changed, column->index)) {
+        if (bitmap_is_set(r->changed, column->index)
+            && ovsdb_type_has_strong_refs(&column->type)) {
             if (r->old && !r->new) {
                 error = ovsdb_txn_adjust_row_refs(
                             txn, r->old, column,
@@ -330,12 +347,13 @@ update_row_ref_count(struct ovsdb_txn *txn, struct ovsdb_txn_row *r)
                     return error;
                 }
             } else if (r->old && r->new) {
-                struct ovsdb_datum added, removed;
+                struct ovsdb_datum added, removed, *diff;
 
+                diff = r->diff ? &r->diff->fields[column->index] : NULL;
                 ovsdb_datum_added_removed(&added, &removed,
                                           &r->old->fields[column->index],
                                           &r->new->fields[column->index],
-                                          &column->type);
+                                          diff, &column->type);
 
                 error = ovsdb_txn_adjust_row_refs(
                             txn, r->old, column, &removed, -1);
@@ -424,6 +442,9 @@ delete_garbage_row(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
         return NULL;
     }
 
+    ovsdb_row_destroy(txn_row->diff);
+    txn_row->diff = NULL;
+
     row = txn_row->new;
     txn_row->new = NULL;
     hmap_remove(&txn_row->table->rows, &row->hmap_node);
@@ -471,6 +492,41 @@ update_ref_counts(struct ovsdb_txn *txn)
     return for_each_txn_row(txn, check_ref_count);
 }
 
+static void
+ovsdb_txn_row_log(const struct ovsdb_txn_row *txn_row)
+{
+    static struct vlog_rate_limit rl_row_log = VLOG_RATE_LIMIT_INIT(30, 60);
+
+    if (!txn_row->table->log) {
+        return;
+    }
+
+    size_t n_columns = shash_count(&txn_row->table->schema->columns);
+    struct ovsdb_row *log_row;
+    const char *op = NULL;
+
+    if (!txn_row->old && txn_row->new) {
+        log_row = txn_row->new;
+        op = "inserted";
+    } else if (txn_row->old && txn_row->new
+               && !bitmap_is_all_zeros(txn_row->changed, n_columns)) {
+        log_row = txn_row->new;
+        op = "updated";
+    } else if (txn_row->old && !txn_row->new) {
+        log_row = txn_row->old;
+        op = "deleted";
+    }
+
+    if (op && !VLOG_DROP_INFO(&rl_row_log)) {
+        struct ds *ds = row_log_str_get();
+        ds_clear(ds);
+        ds_put_format(ds, "table:%s,op:%s,", txn_row->table->schema->name,
+                      op);
+        ovsdb_row_to_string(log_row, ds);
+        VLOG_INFO("%s", ds_cstr(ds));
+    }
+}
+
 static struct ovsdb_error *
 ovsdb_txn_row_commit(struct ovsdb_txn *txn OVS_UNUSED,
                      struct ovsdb_txn_row *txn_row)
@@ -494,11 +550,13 @@ ovsdb_txn_row_commit(struct ovsdb_txn *txn OVS_UNUSED,
         }
     }
 
+    ovsdb_txn_row_log(txn_row);
     ovsdb_txn_row_prefree(txn_row);
     if (txn_row->new) {
         txn_row->new->n_refs = txn_row->n_refs;
     }
     ovsdb_row_destroy(txn_row->old);
+    ovsdb_row_destroy(txn_row->diff);
     free(txn_row);
 
     return NULL;
@@ -533,6 +591,7 @@ ovsdb_txn_update_weak_refs(struct ovsdb_txn *txn OVS_UNUSED,
         dst_row = CONST_CAST(struct ovsdb_row *,
                     ovsdb_table_get_row(weak->dst_table, &weak->dst));
 
+        ovs_assert(dst_row);
         ovs_assert(!ovsdb_row_find_weak_ref(dst_row, weak));
         hmap_insert(&dst_row->dst_refs, &weak->dst_node,
                     ovsdb_weak_ref_hash(weak));
@@ -544,7 +603,7 @@ ovsdb_txn_update_weak_refs(struct ovsdb_txn *txn OVS_UNUSED,
 }
 
 static void
-add_weak_ref(struct ovsdb_txn_row *txn_row, const struct ovsdb_row *dst_,
+add_weak_ref(const struct ovsdb_row *src, const struct ovsdb_row *dst_,
              struct ovs_list *ref_list,
              const union ovsdb_atom *key, const union ovsdb_atom *value,
              bool by_key, const struct ovsdb_column *column)
@@ -552,13 +611,13 @@ add_weak_ref(struct ovsdb_txn_row *txn_row, const struct ovsdb_row *dst_,
     struct ovsdb_row *dst = CONST_CAST(struct ovsdb_row *, dst_);
     struct ovsdb_weak_ref *weak;
 
-    if (txn_row->new == dst) {
+    if (src == dst) {
         return;
     }
 
     weak = xzalloc(sizeof *weak);
-    weak->src_table = txn_row->new->table;
-    weak->src = *ovsdb_row_get_uuid(txn_row->new);
+    weak->src_table = src->table;
+    weak->src = *ovsdb_row_get_uuid(src);
     weak->dst_table = dst->table;
     weak->dst = *ovsdb_row_get_uuid(dst);
     ovsdb_type_clone(&weak->type, &column->type);
@@ -570,10 +629,12 @@ add_weak_ref(struct ovsdb_txn_row *txn_row, const struct ovsdb_row *dst_,
     weak->column_idx = column->index;
     hmap_node_nullify(&weak->dst_node);
     ovs_list_push_back(ref_list, &weak->src_node);
+
+    n_weak_refs++;
 }
 
 static void
-find_and_add_weak_ref(struct ovsdb_txn_row *txn_row,
+find_and_add_weak_ref(const struct ovsdb_row *src,
                       const union ovsdb_atom *key,
                       const union ovsdb_atom *value,
                       const struct ovsdb_column *column,
@@ -585,7 +646,7 @@ find_and_add_weak_ref(struct ovsdb_txn_row *txn_row,
         : ovsdb_table_get_row(column->type.value.uuid.refTable, &value->uuid);
 
     if (row) {
-        add_weak_ref(txn_row, row, ref_list, key, value, by_key, column);
+        add_weak_ref(src, row, ref_list, key, value, by_key, column);
     } else if (not_found) {
         if (uuid_is_zero(by_key ? &key->uuid : &value->uuid)) {
             *zero = true;
@@ -594,11 +655,36 @@ find_and_add_weak_ref(struct ovsdb_txn_row *txn_row,
     }
 }
 
+static void
+find_and_add_weak_refs(const struct ovsdb_row *src,
+                       const struct ovsdb_datum *datum,
+                       const struct ovsdb_column *column,
+                       struct ovs_list *ref_list,
+                       struct ovsdb_datum *not_found, bool *zero)
+{
+    unsigned int i;
+
+    if (ovsdb_base_type_is_weak_ref(&column->type.key)) {
+        for (i = 0; i < datum->n; i++) {
+            find_and_add_weak_ref(src, &datum->keys[i],
+                                  datum->values ? &datum->values[i] : NULL,
+                                  column, true, ref_list, not_found, zero);
+        }
+    }
+
+    if (ovsdb_base_type_is_weak_ref(&column->type.value)) {
+        for (i = 0; i < datum->n; i++) {
+            find_and_add_weak_ref(src, &datum->keys[i], &datum->values[i],
+                                  column, false, ref_list, not_found, zero);
+        }
+    }
+}
+
 static struct ovsdb_error * OVS_WARN_UNUSED_RESULT
 assess_weak_refs(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
 {
     struct ovsdb_weak_ref *weak;
-    struct ovsdb_table *table;
+    struct ovsdb_table *table = txn_row->table;
     struct shash_node *node;
 
     if (txn_row->old && !txn_row->new) {
@@ -620,6 +706,15 @@ assess_weak_refs(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
             ovs_assert(ovs_list_is_empty(&weak->src_node));
             ovs_list_insert(&src_txn_row->deleted_refs, &weak->src_node);
         }
+
+        /* Creating refs that needs to be removed on commit. */
+        SHASH_FOR_EACH (node, &table->schema->columns) {
+            const struct ovsdb_column *column = node->data;
+            struct ovsdb_datum *datum = &txn_row->old->fields[column->index];
+
+            find_and_add_weak_refs(txn_row->old, datum, column,
+                                   &txn_row->deleted_refs, NULL, NULL);
+        }
     }
 
     if (!txn_row->new) {
@@ -630,13 +725,16 @@ assess_weak_refs(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
         return NULL;
     }
 
-    table = txn_row->table;
     SHASH_FOR_EACH (node, &table->schema->columns) {
         const struct ovsdb_column *column = node->data;
         struct ovsdb_datum *datum = &txn_row->new->fields[column->index];
         struct ovsdb_datum added, removed, deleted_refs;
-        unsigned int orig_n, i;
+        unsigned int orig_n;
         bool zero = false;
+
+        if (!ovsdb_type_has_weak_refs(&column->type)) {
+            continue;
+        }
 
         orig_n = datum->n;
 
@@ -650,47 +748,40 @@ assess_weak_refs(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
                 ovs_list_init(&weak->src_node);
             }
         }
-        ovsdb_datum_sort_unique(&deleted_refs, column->type.key.type,
-                                               column->type.value.type);
+        ovsdb_datum_sort_unique(&deleted_refs, &column->type);
 
         /* Removing elements that references deleted rows. */
-        ovsdb_datum_subtract(datum, &column->type,
-                             &deleted_refs, &column->type);
+        if (deleted_refs.n) {
+            ovsdb_datum_subtract(datum, &column->type,
+                                 &deleted_refs, &column->type);
+        }
         ovsdb_datum_destroy(&deleted_refs, &column->type);
 
         /* Generating the difference between old and new data. */
-        if (txn_row->old) {
-            ovsdb_datum_added_removed(&added, &removed,
-                                      &txn_row->old->fields[column->index],
-                                      datum, &column->type);
-        } else {
-            ovsdb_datum_init_empty(&removed);
-            ovsdb_datum_clone(&added, datum, &column->type);
+        ovsdb_datum_init_empty(&added);
+        ovsdb_datum_init_empty(&removed);
+        if (datum->n != orig_n
+            || bitmap_is_set(txn_row->changed, column->index)) {
+            if (txn_row->old) {
+                struct ovsdb_datum *diff;
+
+                diff = txn_row->diff && datum->n == orig_n
+                       ? &txn_row->diff->fields[column->index] : NULL;
+                ovsdb_datum_added_removed(&added, &removed,
+                                          &txn_row->old->fields[column->index],
+                                          datum, diff, &column->type);
+            } else {
+                ovsdb_datum_clone(&added, datum);
+            }
         }
 
         /* Checking added data and creating new references. */
         ovsdb_datum_init_empty(&deleted_refs);
-        if (ovsdb_base_type_is_weak_ref(&column->type.key)) {
-            for (i = 0; i < added.n; i++) {
-                find_and_add_weak_ref(txn_row, &added.keys[i],
-                                      added.values ? &added.values[i] : NULL,
-                                      column, true, &txn_row->added_refs,
-                                      &deleted_refs, &zero);
-            }
-        }
-
-        if (ovsdb_base_type_is_weak_ref(&column->type.value)) {
-            for (i = 0; i < added.n; i++) {
-                find_and_add_weak_ref(txn_row, &added.keys[i],
-                                      &added.values[i],
-                                      column, false, &txn_row->added_refs,
-                                      &deleted_refs, &zero);
-            }
-        }
+        find_and_add_weak_refs(txn_row->new, &added, column,
+                               &txn_row->added_refs, &deleted_refs, &zero);
         if (deleted_refs.n) {
             /* Removing all the references that doesn't point to valid rows. */
-            ovsdb_datum_sort_unique(&deleted_refs, column->type.key.type,
-                                                   column->type.value.type);
+            ovsdb_datum_sort_unique(&deleted_refs, &column->type);
             ovsdb_datum_subtract(datum, &column->type,
                                  &deleted_refs, &column->type);
             ovsdb_datum_destroy(&deleted_refs, &column->type);
@@ -700,28 +791,16 @@ assess_weak_refs(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
         /* Creating refs that needs to be removed on commit.  This includes
          * both: the references that got directly removed from the datum and
          * references removed due to deletion of a referenced row. */
-        if (ovsdb_base_type_is_weak_ref(&column->type.key)) {
-            for (i = 0; i < removed.n; i++) {
-                find_and_add_weak_ref(txn_row, &removed.keys[i],
-                                      removed.values
-                                      ? &removed.values[i] : NULL,
-                                      column, true, &txn_row->deleted_refs,
-                                      NULL, NULL);
-            }
-        }
-
-        if (ovsdb_base_type_is_weak_ref(&column->type.value)) {
-            for (i = 0; i < removed.n; i++) {
-                find_and_add_weak_ref(txn_row, &removed.keys[i],
-                                      &removed.values[i],
-                                      column, false, &txn_row->deleted_refs,
-                                      NULL, NULL);
-            }
-        }
+        find_and_add_weak_refs(txn_row->new, &removed, column,
+                               &txn_row->deleted_refs, NULL, NULL);
         ovsdb_datum_destroy(&removed, &column->type);
 
         if (datum->n != orig_n) {
             bitmap_set1(txn_row->changed, column->index);
+            /* Can no longer rely on the previous diff. */
+            ovsdb_row_destroy(txn_row->diff);
+            txn_row->diff = NULL;
+
             if (datum->n < column->type.n_min) {
                 const struct uuid *row_uuid = ovsdb_row_get_uuid(txn_row->new);
                 if (zero && !txn_row->old) {
@@ -946,8 +1025,16 @@ static struct ovsdb_error * OVS_WARN_UNUSED_RESULT
 count_atoms(struct ovsdb_txn *txn, struct ovsdb_txn_row *txn_row)
 {
     struct ovsdb_table *table = txn_row->table;
+    size_t n_columns = shash_count(&table->schema->columns);
     ssize_t n_atoms_old = 0, n_atoms_new = 0;
     struct shash_node *node;
+
+    if (txn_row->old && txn_row->new
+        && bitmap_is_all_zeros(txn_row->changed, n_columns)) {
+        /* This row didn't change, it has nothing to contribute
+         * to atom counters. */
+        return NULL;
+    }
 
     SHASH_FOR_EACH (node, &table->schema->columns) {
         const struct ovsdb_column *column = node->data;
@@ -1057,7 +1144,7 @@ ovsdb_txn_precommit(struct ovsdb_txn *txn)
 }
 
 static struct ovsdb_txn*
-ovsdb_txn_clone(const struct ovsdb_txn *txn)
+ovsdb_txn_clone_for_history(const struct ovsdb_txn *txn)
 {
     struct ovsdb_txn *txn_cloned = xzalloc(sizeof *txn_cloned);
     ovs_list_init(&txn_cloned->txn_tables);
@@ -1074,14 +1161,22 @@ ovsdb_txn_clone(const struct ovsdb_txn *txn)
         struct ovsdb_txn_row *r;
         HMAP_FOR_EACH (r, hmap_node, &t->txn_rows) {
             size_t n_columns = shash_count(&t->table->schema->columns);
+
+            if (r->old && r->new
+                && bitmap_is_all_zeros(r->changed, n_columns)) {
+                /* The row is neither old or new and no columns changed.
+                 * No need to store in the history. */
+                continue;
+            }
+
             struct ovsdb_txn_row *r_cloned =
                 xzalloc(offsetof(struct ovsdb_txn_row, changed)
                         + bitmap_n_bytes(n_columns));
 
             r_cloned->uuid = r->uuid;
             r_cloned->table = r->table;
-            r_cloned->old = r->old ? ovsdb_row_clone(r->old) : NULL;
-            r_cloned->new = r->new ? ovsdb_row_clone(r->new) : NULL;
+            r_cloned->old = r->old ? ovsdb_row_datum_clone(r->old) : NULL;
+            r_cloned->new = r->new ? ovsdb_row_datum_clone(r->new) : NULL;
             memcpy(&r_cloned->changed, &r->changed, bitmap_n_bytes(n_columns));
             hmap_insert(&t_cloned->txn_rows, &r_cloned->hmap_node,
                         uuid_hash(&r_cloned->uuid));
@@ -1104,6 +1199,7 @@ ovsdb_txn_destroy_cloned(struct ovsdb_txn *txn)
             if (r->new) {
                 ovsdb_row_destroy(r->new);
             }
+            ovs_assert(!r->diff);
             hmap_remove(&t->txn_rows, &r->hmap_node);
             free(r);
         }
@@ -1119,7 +1215,7 @@ ovsdb_txn_add_to_history(struct ovsdb_txn *txn)
 {
     if (txn->db->need_txn_history) {
         struct ovsdb_txn_history_node *node = xzalloc(sizeof *node);
-        node->txn = ovsdb_txn_clone(txn);
+        node->txn = ovsdb_txn_clone_for_history(txn);
         ovs_list_push_back(&txn->db->txn_history, &node->node);
         txn->db->n_txn_history++;
         txn->db->n_txn_history_atoms += txn->n_atoms;
@@ -1190,15 +1286,15 @@ ovsdb_txn_precheck_prereq(const struct ovsdb *db)
 
 struct ovsdb_txn_progress *
 ovsdb_txn_propose_schema_change(struct ovsdb *db,
-                                const struct json *schema,
-                                const struct json *data)
+                                const struct ovsdb_schema *schema,
+                                const struct json *data,
+                                struct uuid *txnid)
 {
     struct ovsdb_txn_progress *progress = xzalloc(sizeof *progress);
     progress->storage = db->storage;
 
-    struct uuid next;
     struct ovsdb_write *write = ovsdb_storage_write_schema_change(
-        db->storage, schema, data, &db->prereq, &next);
+        db->storage, schema, data, &db->prereq, txnid);
     if (!ovsdb_write_is_complete(write)) {
         progress->write = write;
     } else {
@@ -1365,7 +1461,8 @@ ovsdb_txn_create_txn_table(struct ovsdb_txn *txn, struct ovsdb_table *table)
 
 static struct ovsdb_txn_row *
 ovsdb_txn_row_create(struct ovsdb_txn *txn, struct ovsdb_table *table,
-                     const struct ovsdb_row *old_, struct ovsdb_row *new)
+                     const struct ovsdb_row *old_, struct ovsdb_row *new,
+                     struct ovsdb_row *diff)
 {
     const struct ovsdb_row *row = old_ ? old_ : new;
     struct ovsdb_row *old = CONST_CAST(struct ovsdb_row *, old_);
@@ -1379,6 +1476,7 @@ ovsdb_txn_row_create(struct ovsdb_txn *txn, struct ovsdb_table *table,
     txn_row->table = row->table;
     txn_row->old = old;
     txn_row->new = new;
+    txn_row->diff = diff;
     txn_row->n_refs = old ? old->n_refs : 0;
     txn_row->serial = serial - 1;
 
@@ -1391,6 +1489,9 @@ ovsdb_txn_row_create(struct ovsdb_txn *txn, struct ovsdb_table *table,
     if (new) {
         new->txn_row = txn_row;
     }
+    if (diff) {
+        diff->txn_row = txn_row;
+    }
 
     txn_table = ovsdb_txn_create_txn_table(txn, table);
     hmap_insert(&txn_table->txn_rows, &txn_row->hmap_node,
@@ -1399,24 +1500,38 @@ ovsdb_txn_row_create(struct ovsdb_txn *txn, struct ovsdb_table *table,
     return txn_row;
 }
 
-struct ovsdb_row *
-ovsdb_txn_row_modify(struct ovsdb_txn *txn, const struct ovsdb_row *ro_row_)
+void
+ovsdb_txn_row_modify(struct ovsdb_txn *txn, const struct ovsdb_row *ro_row_,
+                     struct ovsdb_row **rw_row, struct ovsdb_row **diff)
 {
     struct ovsdb_row *ro_row = CONST_CAST(struct ovsdb_row *, ro_row_);
 
+    ovs_assert(ro_row);
+    ovs_assert(rw_row);
+
     if (ro_row->txn_row) {
         ovs_assert(ro_row == ro_row->txn_row->new);
-        return ro_row;
+        *rw_row = ro_row;
+        if (diff) {
+            *diff = ro_row->txn_row->diff;
+        } else {
+            /* Caller will modify the row without updating the diff.
+             * Destroy the existing diff, if any, so it will not be
+             * used for this row anymore.  Modification will always
+             * return NULL from this point on. */
+            ovsdb_row_destroy(ro_row->txn_row->diff);
+            ro_row->txn_row->diff = NULL;
+        }
     } else {
         struct ovsdb_table *table = ro_row->table;
-        struct ovsdb_row *rw_row;
 
-        rw_row = ovsdb_row_clone(ro_row);
-        rw_row->n_refs = ro_row->n_refs;
-        ovsdb_txn_row_create(txn, table, ro_row, rw_row);
-        hmap_replace(&table->rows, &ro_row->hmap_node, &rw_row->hmap_node);
-
-        return rw_row;
+        *rw_row = ovsdb_row_clone(ro_row);
+        (*rw_row)->n_refs = ro_row->n_refs;
+        if (diff) {
+            *diff = ovsdb_row_create(table);
+        }
+        ovsdb_txn_row_create(txn, table, ro_row, *rw_row, diff ? *diff : NULL);
+        hmap_replace(&table->rows, &ro_row->hmap_node, &(*rw_row)->hmap_node);
     }
 }
 
@@ -1428,7 +1543,7 @@ ovsdb_txn_row_insert(struct ovsdb_txn *txn, struct ovsdb_row *row)
 
     uuid_generate(ovsdb_row_get_version_rw(row));
 
-    ovsdb_txn_row_create(txn, table, NULL, row);
+    ovsdb_txn_row_create(txn, table, NULL, row, NULL);
     hmap_insert(&table->rows, &row->hmap_node, hash);
 }
 
@@ -1444,9 +1559,11 @@ ovsdb_txn_row_delete(struct ovsdb_txn *txn, const struct ovsdb_row *row_)
     hmap_remove(&table->rows, &row->hmap_node);
 
     if (!txn_row) {
-        ovsdb_txn_row_create(txn, table, row, NULL);
+        ovsdb_txn_row_create(txn, table, row, NULL, NULL);
     } else {
         ovs_assert(txn_row->new == row);
+        ovsdb_row_destroy(txn_row->diff);
+        txn_row->diff = NULL;
         if (txn_row->old) {
             txn_row->new = NULL;
         } else {

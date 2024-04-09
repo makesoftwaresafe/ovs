@@ -40,6 +40,7 @@
 #include "netdev.h"
 #include "netdev-offload.h"
 #include "nx-match.h"
+#include "odp-execute.h"
 #include "ofproto/bond.h"
 #include "ofproto/ofproto.h"
 #include "openvswitch/dynamic-string.h"
@@ -69,7 +70,6 @@
 #include "util.h"
 #include "unixctl.h"
 #include "lib/vswitch-idl.h"
-#include "xenserver.h"
 #include "vlan-bitmap.h"
 
 VLOG_DEFINE_THIS_MODULE(bridge);
@@ -157,6 +157,8 @@ struct aa_mapping {
 /* Internal representation of conntrack zone configuration table in OVSDB. */
 struct ct_zone {
     uint16_t zone_id;
+    int64_t limit;              /* Limit of allowed entries. '-1' if not
+                                 * specified. */
     struct simap tp;            /* A map from timeout policy attribute to
                                  * timeout value. */
     struct hmap_node node;      /* Node in 'struct datapath' 'ct_zones'
@@ -168,14 +170,15 @@ struct ct_zone {
 
 /* Internal representation of datapath configuration table in OVSDB. */
 struct datapath {
-    char *type;                 /* Datapath type. */
-    struct hmap ct_zones;       /* Map of 'struct ct_zone' elements, indexed
-                                 * by 'zone'. */
-    struct hmap_node node;      /* Node in 'all_datapaths' hmap. */
-    struct smap caps;           /* Capabilities. */
-    unsigned int last_used;     /* The last idl_seqno that this 'datapath'
-                                 * used in OVSDB. This number is used for
-                                 * garbage collection. */
+    char *type;                     /* Datapath type. */
+    struct hmap ct_zones;           /* Map of 'struct ct_zone' elements,
+                                     * indexed by 'zone'. */
+    struct hmap_node node;          /* Node in 'all_datapaths' hmap. */
+    struct smap caps;               /* Capabilities. */
+    unsigned int last_used;         /* The last idl_seqno that this 'datapath'
+                                     * used in OVSDB. This number is used for
+                                     * garbage collection. */
+    int64_t ct_zone_default_limit;  /* Default CT limit for all zones. */
 };
 
 /* All bridges, indexed by name. */
@@ -298,9 +301,7 @@ static void bridge_configure_remotes(struct bridge *,
 static void bridge_pick_local_hw_addr(struct bridge *, struct eth_addr *ea,
                                       struct iface **hw_addr_iface);
 static uint64_t bridge_pick_datapath_id(struct bridge *,
-                                        const struct eth_addr bridge_ea,
-                                        struct iface *hw_addr_iface);
-static uint64_t dpid_from_hash(const void *, size_t nbytes);
+                                        const struct eth_addr bridge_ea);
 static bool bridge_has_bond_fake_iface(const struct bridge *,
                                        const char *name);
 static bool port_is_bond_fake_iface(const struct port *);
@@ -530,6 +531,8 @@ bridge_init(const char *remote)
     stp_init();
     lldp_init();
     rstp_init();
+    odp_execute_init();
+
     ifaces_changed = seq_create();
     last_ifaces_changed = seq_read(ifaces_changed);
     ifnotifier = if_notifier_create(if_change_cb, NULL);
@@ -662,6 +665,7 @@ ct_zone_alloc(uint16_t zone_id, struct ovsrec_ct_timeout_policy *tp_cfg)
     struct ct_zone *ct_zone = xzalloc(sizeof *ct_zone);
 
     ct_zone->zone_id = zone_id;
+    ct_zone->limit = -1;
     simap_init(&ct_zone->tp);
     get_timeout_policy_from_ovsrec(&ct_zone->tp, tp_cfg);
     return ct_zone;
@@ -670,6 +674,14 @@ ct_zone_alloc(uint16_t zone_id, struct ovsrec_ct_timeout_policy *tp_cfg)
 static void
 ct_zone_remove_and_destroy(struct datapath *dp, struct ct_zone *ct_zone)
 {
+    if (!simap_is_empty(&ct_zone->tp)) {
+        ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
+    }
+
+    if (ct_zone->limit > -1) {
+        ofproto_ct_zone_limit_update(dp->type, ct_zone->zone_id, NULL);
+    }
+
     hmap_remove(&dp->ct_zones, &ct_zone->node);
     simap_destroy(&ct_zone->tp);
     free(ct_zone);
@@ -706,6 +718,7 @@ datapath_create(const char *type)
 {
     struct datapath *dp = xzalloc(sizeof *dp);
     dp->type = xstrdup(type);
+    dp->ct_zone_default_limit = -1;
     hmap_init(&dp->ct_zones);
     hmap_insert(&all_datapaths, &dp->node, hash_string(type, 0));
     smap_init(&dp->caps);
@@ -722,6 +735,12 @@ datapath_destroy(struct datapath *dp)
             ct_zone_remove_and_destroy(dp, ct_zone);
         }
 
+        if (dp->ct_zone_default_limit > -1) {
+            ofproto_ct_zone_limit_update(dp->type, OVS_ZONE_LIMIT_DEFAULT_ZONE,
+                                         NULL);
+        }
+
+        ofproto_ct_zone_limit_protection_update(dp->type, false);
         hmap_remove(&all_datapaths, &dp->node);
         hmap_destroy(&dp->ct_zones);
         free(dp->type);
@@ -734,6 +753,7 @@ static void
 ct_zones_reconfigure(struct datapath *dp, struct ovsrec_datapath *dp_cfg)
 {
     struct ct_zone *ct_zone;
+    bool protected = false;
 
     /* Add new 'ct_zone's or update existing 'ct_zone's based on the database
      * state. */
@@ -743,29 +763,55 @@ ct_zones_reconfigure(struct datapath *dp, struct ovsrec_datapath *dp_cfg)
         struct ovsrec_ct_timeout_policy *tp_cfg = zone_cfg->timeout_policy;
 
         ct_zone = ct_zone_lookup(&dp->ct_zones, zone_id);
-        if (ct_zone) {
-            struct simap new_tp = SIMAP_INITIALIZER(&new_tp);
-            get_timeout_policy_from_ovsrec(&new_tp, tp_cfg);
-            if (update_timeout_policy(&ct_zone->tp, &new_tp)) {
-                ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
-                                                   &ct_zone->tp);
-            }
-        } else {
+        if (!ct_zone) {
             ct_zone = ct_zone_alloc(zone_id, tp_cfg);
             hmap_insert(&dp->ct_zones, &ct_zone->node, hash_int(zone_id, 0));
-            ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
-                                               &ct_zone->tp);
         }
+
+        struct simap new_tp = SIMAP_INITIALIZER(&new_tp);
+        get_timeout_policy_from_ovsrec(&new_tp, tp_cfg);
+
+        if (update_timeout_policy(&ct_zone->tp, &new_tp)) {
+            if (simap_count(&ct_zone->tp)) {
+                ofproto_ct_set_zone_timeout_policy(dp->type, ct_zone->zone_id,
+                                                   &ct_zone->tp);
+            } else {
+                ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
+            }
+        }
+
+        int64_t desired_limit = zone_cfg->limit ? *zone_cfg->limit : -1;
+        if (ct_zone->limit != desired_limit) {
+            ofproto_ct_zone_limit_update(dp->type, zone_id, zone_cfg->limit);
+            ct_zone->limit = desired_limit;
+        }
+
         ct_zone->last_used = idl_seqno;
+
+        protected = protected || !!zone_cfg->limit;
     }
 
     /* Purge 'ct_zone's no longer found in the database. */
     HMAP_FOR_EACH_SAFE (ct_zone, node, &dp->ct_zones) {
         if (ct_zone->last_used != idl_seqno) {
-            ofproto_ct_del_zone_timeout_policy(dp->type, ct_zone->zone_id);
             ct_zone_remove_and_destroy(dp, ct_zone);
         }
     }
+
+    /* Reconfigure default CT zone limit if needed. */
+    int64_t default_limit = dp_cfg->ct_zone_default_limit
+                            ? *dp_cfg->ct_zone_default_limit
+                            : -1;
+
+    if (dp->ct_zone_default_limit != default_limit) {
+        ofproto_ct_zone_limit_update(dp->type, OVS_ZONE_LIMIT_DEFAULT_ZONE,
+                                     dp_cfg->ct_zone_default_limit);
+        dp->ct_zone_default_limit = default_limit;
+    }
+
+    protected = protected || !!dp_cfg->ct_zone_default_limit;
+
+    ofproto_ct_zone_limit_protection_update(dp->type, protected);
 }
 
 static void
@@ -832,6 +878,9 @@ bridge_reconfigure(const struct ovsrec_open_vswitch *ovs_cfg)
     ofproto_set_min_revalidate_pps(
         smap_get_uint(&ovs_cfg->other_config, "min-revalidate-pps",
                      OFPROTO_MIN_REVALIDATE_PPS_DEFAULT));
+    ofproto_set_offloaded_stats_delay(
+        smap_get_uint(&ovs_cfg->other_config, "offloaded-stats-delay",
+                      OFPROTO_OFFLOADED_STATS_DELAY));
     ofproto_set_vlan_limit(smap_get_int(&ovs_cfg->other_config, "vlan-limit",
                                        LEGACY_MAX_VLAN_HEADERS));
     ofproto_set_bundle_idle_timeout(smap_get_uint(&ovs_cfg->other_config,
@@ -1326,7 +1375,7 @@ bridge_configure_datapath_id(struct bridge *br)
     }
     br->ea = ea;
 
-    dpid = bridge_pick_datapath_id(br, ea, hw_addr_iface);
+    dpid = bridge_pick_datapath_id(br, ea);
     if (dpid != ofproto_get_datapath_id(br->ofproto)) {
         VLOG_INFO("bridge %s: using datapath ID %016"PRIx64, br->name, dpid);
         ofproto_set_datapath_id(br->ofproto, dpid);
@@ -1542,15 +1591,26 @@ bridge_configure_ipfix(struct bridge *br)
         if (be_cfg->cache_max_flows) {
             be_opts.cache_max_flows = *be_cfg->cache_max_flows;
         }
+        if (be_cfg->stats_interval) {
+            be_opts.stats_interval = *be_cfg->stats_interval;
+        } else {
+            be_opts.stats_interval = OFPROTO_IPFIX_DEFAULT_TEMPLATE_INTERVAL;
+        }
+        if (be_cfg->template_interval) {
+            be_opts.template_interval = *be_cfg->template_interval;
+        } else {
+            be_opts.template_interval =
+                OFPROTO_IPFIX_DEFAULT_TEMPLATE_INTERVAL;
+        }
 
         be_opts.enable_tunnel_sampling = smap_get_bool(&be_cfg->other_config,
                                              "enable-tunnel-sampling", true);
 
-        be_opts.enable_input_sampling = !smap_get_bool(&be_cfg->other_config,
-                                              "enable-input-sampling", false);
+        be_opts.enable_input_sampling = smap_get_bool(&be_cfg->other_config,
+                                              "enable-input-sampling", true);
 
-        be_opts.enable_output_sampling = !smap_get_bool(&be_cfg->other_config,
-                                              "enable-output-sampling", false);
+        be_opts.enable_output_sampling = smap_get_bool(&be_cfg->other_config,
+                                              "enable-output-sampling", true);
 
         virtual_obs_id = smap_get(&be_cfg->other_config, "virtual_obs_id");
         be_opts.virtual_obs_id = nullable_xstrdup(virtual_obs_id);
@@ -1570,6 +1630,12 @@ bridge_configure_ipfix(struct bridge *br)
                     ? *fe_cfg->ipfix->cache_active_timeout : 0;
                 opts->cache_max_flows = fe_cfg->ipfix->cache_max_flows
                     ? *fe_cfg->ipfix->cache_max_flows : 0;
+                opts->stats_interval = fe_cfg->ipfix->stats_interval
+                    ? *fe_cfg->ipfix->stats_interval
+                    : OFPROTO_IPFIX_DEFAULT_TEMPLATE_INTERVAL;
+                opts->template_interval = fe_cfg->ipfix->template_interval
+                    ? *fe_cfg->ipfix->template_interval
+                    : OFPROTO_IPFIX_DEFAULT_TEMPLATE_INTERVAL;
                 opts->enable_tunnel_sampling = smap_get_bool(
                                                    &fe_cfg->ipfix->other_config,
                                                   "enable-tunnel-sampling", true);
@@ -1674,11 +1740,12 @@ port_configure_stp(const struct ofproto *ofproto, struct port *port,
     if (config_str) {
         port_s->path_cost = strtoul(config_str, NULL, 10);
     } else {
-        enum netdev_features current;
-        unsigned int mbps;
+        uint32_t mbps;
 
-        netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, 100 * 1000 * 1000) / 1000000;
+        netdev_get_speed(iface->netdev, &mbps, NULL);
+        if (!mbps) {
+            mbps = NETDEV_DEFAULT_BPS / 1000000;
+        }
         port_s->path_cost = stp_convert_speed_to_cost(mbps);
     }
 
@@ -1757,11 +1824,12 @@ port_configure_rstp(const struct ofproto *ofproto, struct port *port,
     if (config_str) {
         port_s->path_cost = strtoul(config_str, NULL, 10);
     } else {
-        enum netdev_features current;
-        unsigned int mbps;
+        uint32_t mbps;
 
-        netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-        mbps = netdev_features_to_bps(current, 100 * 1000 * 1000) / 1000000;
+        netdev_get_speed(iface->netdev, &mbps, NULL);
+        if (!mbps) {
+            mbps = NETDEV_DEFAULT_BPS / 1000000;
+        }
         port_s->path_cost = rstp_convert_speed_to_cost(mbps);
     }
 
@@ -2359,14 +2427,10 @@ bridge_pick_local_hw_addr(struct bridge *br, struct eth_addr *ea,
 }
 
 /* Choose and returns the datapath ID for bridge 'br' given that the bridge
- * Ethernet address is 'bridge_ea'.  If 'bridge_ea' is the Ethernet address of
- * an interface on 'br', then that interface must be passed in as
- * 'hw_addr_iface'; if 'bridge_ea' was derived some other way, then
- * 'hw_addr_iface' must be passed in as a null pointer. */
+ * Ethernet address is 'bridge_ea'.  */
 static uint64_t
 bridge_pick_datapath_id(struct bridge *br,
-                        const struct eth_addr bridge_ea,
-                        struct iface *hw_addr_iface)
+                        const struct eth_addr bridge_ea)
 {
     /*
      * The procedure for choosing a bridge MAC address will, in the most
@@ -2388,44 +2452,7 @@ bridge_pick_datapath_id(struct bridge *br,
         return dpid;
     }
 
-    if (!hw_addr_iface) {
-        /*
-         * A purely internal bridge, that is, one that has no non-virtual
-         * network devices on it at all, is difficult because it has no
-         * natural unique identifier at all.
-         *
-         * When the host is a XenServer, we handle this case by hashing the
-         * host's UUID with the name of the bridge.  Names of bridges are
-         * persistent across XenServer reboots, although they can be reused if
-         * an internal network is destroyed and then a new one is later
-         * created, so this is fairly effective.
-         *
-         * When the host is not a XenServer, we punt by using a random MAC
-         * address on each run.
-         */
-        const char *host_uuid = xenserver_get_host_uuid();
-        if (host_uuid) {
-            char *combined = xasprintf("%s,%s", host_uuid, br->name);
-            dpid = dpid_from_hash(combined, strlen(combined));
-            free(combined);
-            return dpid;
-        }
-    }
-
     return eth_addr_to_uint64(bridge_ea);
-}
-
-static uint64_t
-dpid_from_hash(const void *data, size_t n)
-{
-    union {
-        uint8_t bytes[SHA1_DIGEST_SIZE];
-        struct eth_addr ea;
-    } hash;
-
-    sha1_bytes(data, n, hash.bytes);
-    eth_addr_mark_random(&hash.ea);
-    return eth_addr_to_uint64(hash.ea);
 }
 
 static void
@@ -2439,6 +2466,7 @@ iface_refresh_netdev_status(struct iface *iface)
     struct eth_addr mac;
     int64_t bps, mtu_64, ifindex64, link_resets;
     int mtu, error;
+    uint32_t mbps;
 
     if (iface_is_synthetic(iface)) {
         return;
@@ -2477,14 +2505,19 @@ iface_refresh_netdev_status(struct iface *iface)
     ovsrec_interface_set_link_resets(iface->cfg, &link_resets, 1);
 
     error = netdev_get_features(iface->netdev, &current, NULL, NULL, NULL);
-    bps = !error ? netdev_features_to_bps(current, 0) : 0;
-    if (bps) {
+    if (!error) {
         ovsrec_interface_set_duplex(iface->cfg,
                                     netdev_features_is_full_duplex(current)
                                     ? "full" : "half");
-        ovsrec_interface_set_link_speed(iface->cfg, &bps, 1);
     } else {
         ovsrec_interface_set_duplex(iface->cfg, NULL);
+    }
+
+    netdev_get_speed(iface->netdev, &mbps, NULL);
+    if (mbps) {
+        bps = mbps * 1000000ULL;
+        ovsrec_interface_set_link_speed(iface->cfg, &bps, 1);
+    } else {
         ovsrec_interface_set_link_speed(iface->cfg, NULL, 0);
     }
 
@@ -2660,13 +2693,16 @@ iface_refresh_stats(struct iface *iface)
     IFACE_STAT(tx_512_to_1023_packets,  "tx_512_to_1023_packets")   \
     IFACE_STAT(tx_1024_to_1522_packets, "tx_1024_to_1522_packets")  \
     IFACE_STAT(tx_1523_to_max_packets,  "tx_1523_to_max_packets")   \
+    IFACE_STAT(multicast,               "rx_multicast_packets")     \
     IFACE_STAT(tx_multicast_packets,    "tx_multicast_packets")     \
     IFACE_STAT(rx_broadcast_packets,    "rx_broadcast_packets")     \
     IFACE_STAT(tx_broadcast_packets,    "tx_broadcast_packets")     \
     IFACE_STAT(rx_undersized_errors,    "rx_undersized_errors")     \
     IFACE_STAT(rx_oversize_errors,      "rx_oversize_errors")       \
     IFACE_STAT(rx_fragmented_errors,    "rx_fragmented_errors")     \
-    IFACE_STAT(rx_jabber_errors,        "rx_jabber_errors")
+    IFACE_STAT(rx_jabber_errors,        "rx_jabber_errors")         \
+    IFACE_STAT(upcall_packets,          "upcall_packets")           \
+    IFACE_STAT(upcall_errors,           "upcall_errors")
 
 #define IFACE_STAT(MEMBER, NAME) + 1
     enum { N_IFACE_STATS = IFACE_STATS };
@@ -4615,6 +4651,9 @@ port_configure_bond(struct port *port, struct bond_settings *s)
     s->use_lb_output_action = (s->balance == BM_TCP)
                               && smap_get_bool(&port->cfg->other_config,
                                                "lb-output-action", false);
+    /* all_members_active is disabled by default. */
+    s->all_members_active = smap_get_bool(&port->cfg->other_config,
+                                          "all-members-active", false);
 }
 
 /* Returns true if 'port' is synthetic, that is, if we constructed it locally

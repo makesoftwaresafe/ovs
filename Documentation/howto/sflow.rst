@@ -68,7 +68,7 @@ cookbook entry, we use `sFlowTrend
 <http://www.inmon.com/products/sFlowTrend.php>`__, a free sFlow collector that
 is a simple cross-platform Java download. Other sFlow collectors should work
 equally well. `hostMon` has a single NIC, `eth0`, that is connected to the
-Management Network. `eth0` has an IP adress that can reach `eth1` on `host1`.
+Management Network. `eth0` has an IP address that can reach `eth1` on `host1`.
 
 Two Virtual Machines
 ~~~~~~~~~~~~~~~~~~~~
@@ -76,8 +76,7 @@ Two Virtual Machines
 This guide uses two virtual machines - `vm1` and `vm2`-  running on `host1`.
 
 .. note::
-  For Xen/XenServer, VM interfaces appears as Linux devices with names like
-  ``vif1.0``. Other Linux systems may present these interfaces as ``vnet0``,
+  VM interfaces may appear as Linux devices with names like ``vnet0``,
   ``vnet1``, etc.
 
 Configuration Steps

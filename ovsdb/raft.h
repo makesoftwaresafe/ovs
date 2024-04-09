@@ -26,7 +26,8 @@
  * ==========
  *
  * Based on Diego Ongaro's Ph.D. thesis, "Consensus: Bridging Theory and
- * Practice", available at https://ramcloud.stanford.edu/~ongaro/thesis.pdf.
+ * Practice", available at
+ * https://github.com/ongardie/dissertation/blob/master/stanford.pdf.
  * References to sections, pages, and figures are from this thesis.  Quotations
  * in comments also come from this work, in accordance with its license notice,
  * reproduced below:
@@ -180,7 +181,8 @@ uint64_t raft_get_log_length(const struct raft *);
 bool raft_may_snapshot(const struct raft *);
 void raft_notify_snapshot_recommended(struct raft *);
 struct ovsdb_error *raft_store_snapshot(struct raft *,
-                                        const struct json *new_snapshot)
+                                        const struct json *new_snapshot,
+                                        uint64_t applied_index)
     OVS_WARN_UNUSED_RESULT;
 
 /* Cluster management. */

@@ -125,6 +125,8 @@ struct bond {
     uint32_t basis;             /* Basis for flow hash function. */
     bool use_lb_output_action;  /* Use lb_output action to avoid recirculation.
                                    Applicable only for Balance TCP mode. */
+    bool all_members_active;    /* Accept multicast packets on secondary
+                                   members of a non-LACP Balance SLB bond. */
     char *primary;              /* Name of the primary member. */
 
     /* SLB specific bonding info. */
@@ -184,10 +186,14 @@ static struct bond_member *choose_output_member(const struct bond *,
                                                 struct flow_wildcards *,
                                                 uint16_t vlan)
     OVS_REQ_RDLOCK(rwlock);
-static void update_recirc_rules__(struct bond *);
+static void update_recirc_rules(struct bond *) OVS_REQ_WRLOCK(rwlock);
+static bool bond_may_recirc(const struct bond *);
+static void bond_update_post_recirc_rules__(struct bond *, bool force)
+    OVS_REQ_WRLOCK(rwlock);
 static bool bond_is_falling_back_to_ab(const struct bond *);
 static void bond_add_lb_output_buckets(const struct bond *);
 static void bond_del_lb_output_buckets(const struct bond *);
+
 
 /* Attempts to parse 's' as the name of a bond balancing mode.  If successful,
  * stores the mode in '*balance' and returns true.  Otherwise returns false
@@ -293,7 +299,10 @@ bond_unref(struct bond *bond)
     }
     free(bond->hash);
     bond->hash = NULL;
-    update_recirc_rules__(bond);
+
+    ovs_rwlock_wrlock(&rwlock);
+    update_recirc_rules(bond);
+    ovs_rwlock_unlock(&rwlock);
 
     hmap_destroy(&bond->pr_rule_ops);
     free(bond->primary);
@@ -325,17 +334,8 @@ add_pr_rule(struct bond *bond, const struct match *match,
     hmap_insert(&bond->pr_rule_ops, &pr_op->hmap_node, hash);
 }
 
-/* This function should almost never be called directly.
- * 'update_recirc_rules()' should be called instead.  Since
- * this function modifies 'bond->pr_rule_ops', it is only
- * safe when 'rwlock' is held.
- *
- * However, when the 'bond' is the only reference in the system,
- * calling this function avoid acquiring lock only to satisfy
- * lock annotation. Currently, only 'bond_unref()' calls
- * this function directly.  */
 static void
-update_recirc_rules__(struct bond *bond)
+update_recirc_rules(struct bond *bond) OVS_REQ_WRLOCK(rwlock)
 {
     struct match match;
     struct bond_pr_rule_op *pr_op;
@@ -401,6 +401,15 @@ update_recirc_rules__(struct bond *bond)
 
                 VLOG_ERR("failed to remove post recirculation flow %s", err_s);
                 free(err_s);
+            } else if (bond->hash) {
+                /* If the flow deletion failed, a subsequent call to
+                 * ofproto_dpif_add_internal_flow() would just modify the
+                 * flow preserving its statistics.  Therefore, only reset
+                 * the entry's byte counter if it succeeds. */
+                uint32_t hash = pr_op->match.flow.dp_hash & BOND_MASK;
+                struct bond_entry *entry = &bond->hash[hash];
+
+                entry->pr_tx_bytes = 0;
             }
 
             hmap_remove(&bond->pr_rule_ops, &pr_op->hmap_node);
@@ -415,12 +424,6 @@ update_recirc_rules__(struct bond *bond)
     ofpbuf_uninit(&ofpacts);
 }
 
-static void
-update_recirc_rules(struct bond *bond)
-    OVS_REQ_RDLOCK(rwlock)
-{
-    update_recirc_rules__(bond);
-}
 
 /* Updates 'bond''s overall configuration to 's'.
  *
@@ -480,6 +483,9 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
         revalidate = true;
     }
 
+    bond->all_members_active = (bond->balance == BM_SLB)
+                               ? s->all_members_active : false;
+
     if (bond->balance != BM_AB) {
         if (!bond->recirc_id) {
             bond->recirc_id = recirc_alloc_id(bond->ofproto);
@@ -508,6 +514,12 @@ bond_reconfigure(struct bond *bond, const struct bond_settings *s)
 
     if (bond->balance == BM_AB || !bond->hash || revalidate) {
         bond_entry_reset(bond);
+    }
+
+    if (bond->ofproto->backer->rt_support.odp.recirc
+        && bond_may_recirc(bond)) {
+        /* Update rules to reflect possible recirc_id changes. */
+        update_recirc_rules(bond);
     }
 
     ovs_rwlock_unlock(&rwlock);
@@ -723,6 +735,12 @@ bond_run(struct bond *bond, enum lacp_status lacp_status)
         bond_choose_active_member(bond);
     }
 
+    if (bond->ofproto->backer->rt_support.odp.recirc
+        && bond_may_recirc(bond)) {
+        /* Update rules to reflect possible link state changes. */
+        bond_update_post_recirc_rules__(bond, false);
+    }
+
     revalidate = bond->bond_revalidate;
     bond->bond_revalidate = false;
     ovs_rwlock_unlock(&rwlock);
@@ -876,7 +894,7 @@ bond_check_admissibility(struct bond *bond, const void *member_,
         if (!member->enabled && member->may_enable) {
             VLOG_DBG_RL(&rl, "bond %s: member %s: "
                         "main thread has not yet enabled member",
-                        bond->name, bond->active_member->name);
+                        bond->name, member->name);
         }
         goto out;
     case LACP_CONFIGURED:
@@ -893,7 +911,7 @@ bond_check_admissibility(struct bond *bond, const void *member_,
 
     /* Drop all multicast packets on inactive members. */
     if (eth_addr_is_multicast(eth_dst)) {
-        if (bond->active_member != member) {
+        if (bond->active_member != member && !bond->all_members_active) {
             goto out;
         }
     }
@@ -1086,6 +1104,19 @@ bond_update_post_recirc_rules(struct bond *bond, uint32_t *recirc_id,
     }
 }
 
+void
+bond_get_recirc_id_and_hash_basis(struct bond *bond, uint32_t *recirc_id,
+                                  uint32_t *hash_basis)
+{
+    ovs_rwlock_rdlock(&rwlock);
+    if (bond_may_recirc(bond)) {
+        *recirc_id = bond->recirc_id;
+        *hash_basis = bond->basis;
+    } else {
+        *recirc_id = *hash_basis = 0;
+    }
+    ovs_rwlock_unlock(&rwlock);
+}
 
 /* Rebalancing. */
 
@@ -1494,6 +1525,11 @@ bond_print_details(struct ds *ds, const struct bond *bond)
     ds_put_format(ds, "lb_output action: %s, bond-id: %d\n",
                   use_lb_output_action ? "enabled" : "disabled",
                   use_lb_output_action ? recirc_id : -1);
+
+    if (bond->balance == BM_SLB) {
+        ds_put_format(ds, "all members active: %s\n",
+                      bond->all_members_active ? "true" : "false");
+    }
 
     ds_put_format(ds, "updelay: %d ms\n", bond->updelay);
     ds_put_format(ds, "downdelay: %d ms\n", bond->downdelay);

@@ -21,7 +21,7 @@ AC_DEFUN([OVS_CHECK_COVERAGE],
   [AC_REQUIRE([AC_PROG_CC])
    AC_ARG_ENABLE(
      [coverage],
-     [AC_HELP_STRING([--enable-coverage],
+     [AS_HELP_STRING([--enable-coverage],
                      [Enable gcov coverage tool.])],
      [case "${enableval}" in
         (yes) coverage=true ;;
@@ -50,7 +50,7 @@ dnl Checks for --enable-ndebug and defines NDEBUG if it is specified.
 AC_DEFUN([OVS_CHECK_NDEBUG],
   [AC_ARG_ENABLE(
      [ndebug],
-     [AC_HELP_STRING([--enable-ndebug],
+     [AS_HELP_STRING([--enable-ndebug],
                      [Disable debugging features for max performance])],
      [case "${enableval}" in
         (yes) ndebug=true ;;
@@ -64,7 +64,7 @@ dnl Checks for --enable-usdt-probes and defines HAVE_USDT if it is specified.
 AC_DEFUN([OVS_CHECK_USDT], [
   AC_ARG_ENABLE(
     [usdt-probes],
-    [AC_HELP_STRING([--enable-usdt-probes],
+    [AS_HELP_STRING([--enable-usdt-probes],
                     [Enable User Statically Defined Tracing (USDT) probes])],
     [case "${enableval}" in
        (yes) usdt=true ;;
@@ -227,7 +227,7 @@ dnl Checks for libcap-ng.
 AC_DEFUN([OVS_CHECK_LIBCAPNG],
   [AC_ARG_ENABLE(
      [libcapng],
-     [AC_HELP_STRING([--disable-libcapng], [Disable Linux capability support])],
+     [AS_HELP_STRING([--disable-libcapng], [Disable Linux capability support])],
      [case "${enableval}" in
         (yes) libcapng=true ;;
         (no)  libcapng=false ;;
@@ -263,7 +263,7 @@ dnl Checks for OpenSSL.
 AC_DEFUN([OVS_CHECK_OPENSSL],
   [AC_ARG_ENABLE(
      [ssl],
-     [AC_HELP_STRING([--disable-ssl], [Disable OpenSSL support])],
+     [AS_HELP_STRING([--disable-ssl], [Disable OpenSSL support])],
      [case "${enableval}" in
         (yes) ssl=true ;;
         (no)  ssl=false ;;
@@ -320,7 +320,7 @@ dnl Checks for the directory in which to store the PKI.
 AC_DEFUN([OVS_CHECK_PKIDIR],
   [AC_ARG_WITH(
      [pkidir],
-     AC_HELP_STRING([--with-pkidir=DIR],
+     AS_HELP_STRING([--with-pkidir=DIR],
                     [PKI hierarchy directory [[LOCALSTATEDIR/lib/openvswitch/pki]]]),
      [PKIDIR=$withval],
      [PKIDIR='${localstatedir}/lib/openvswitch/pki'])
@@ -330,7 +330,7 @@ dnl Checks for the directory in which to store pidfiles.
 AC_DEFUN([OVS_CHECK_RUNDIR],
   [AC_ARG_WITH(
      [rundir],
-     AC_HELP_STRING([--with-rundir=DIR],
+     AS_HELP_STRING([--with-rundir=DIR],
                     [directory used for pidfiles
                     [[LOCALSTATEDIR/run/openvswitch]]]),
      [RUNDIR=$withval],
@@ -341,7 +341,7 @@ dnl Checks for the directory in which to store logs.
 AC_DEFUN([OVS_CHECK_LOGDIR],
   [AC_ARG_WITH(
      [logdir],
-     AC_HELP_STRING([--with-logdir=DIR],
+     AS_HELP_STRING([--with-logdir=DIR],
                     [directory used for logs [[LOCALSTATEDIR/log/PACKAGE]]]),
      [LOGDIR=$withval],
      [LOGDIR='${localstatedir}/log/${PACKAGE}'])
@@ -351,7 +351,7 @@ dnl Checks for the directory in which to store the Open vSwitch database.
 AC_DEFUN([OVS_CHECK_DBDIR],
   [AC_ARG_WITH(
      [dbdir],
-     AC_HELP_STRING([--with-dbdir=DIR],
+     AS_HELP_STRING([--with-dbdir=DIR],
                     [directory used for conf.db [[SYSCONFDIR/PACKAGE]]]),
      [DBDIR=$withval],
      [DBDIR='${sysconfdir}/${PACKAGE}'])
@@ -360,8 +360,12 @@ AC_DEFUN([OVS_CHECK_DBDIR],
 dnl Defines HAVE_BACKTRACE if backtrace() is found.
 AC_DEFUN([OVS_CHECK_BACKTRACE],
   [AC_SEARCH_LIBS([backtrace], [execinfo ubacktrace],
-                  [AC_DEFINE([HAVE_BACKTRACE], [1],
-                             [Define to 1 if you have backtrace(3).])])])
+                  [HAVE_BACKTRACE=yes], [HAVE_BACKTRACE=no])
+   if test "$HAVE_BACKTRACE" = "yes"; then
+     AC_DEFINE([HAVE_BACKTRACE], [1], [Define to 1 if you have backtrace(3).])
+   fi
+   AM_CONDITIONAL([HAVE_BACKTRACE], [test "$HAVE_BACKTRACE" = "yes"])
+   AC_SUBST([HAVE_BACKTRACE])])
 
 dnl Defines HAVE_PERF_EVENT if linux/perf_event.h is found.
 AC_DEFUN([OVS_CHECK_PERF_EVENT],
@@ -371,16 +375,16 @@ dnl Checks for valgrind/valgrind.h.
 AC_DEFUN([OVS_CHECK_VALGRIND],
   [AC_CHECK_HEADERS([valgrind/valgrind.h])])
 
-dnl Checks for Python 3.4 or later.
+dnl Checks for Python 3.6 or later.
 AC_DEFUN([OVS_CHECK_PYTHON3],
   [AC_CACHE_CHECK(
-     [for Python 3 (version 3.4 or later)],
+     [for Python 3 (version 3.6 or later)],
      [ovs_cv_python3],
      [if test -n "$PYTHON3"; then
         ovs_cv_python3=$PYTHON3
       else
         ovs_cv_python3=no
-        for binary in python3 python3.4 python3.5 python3.6 python3.7; do
+        for binary in python3 python3.6 python3.7 python3.8 python3.9 python3.10 python3.11 python3.12; do
           ovs_save_IFS=$IFS; IFS=$PATH_SEPARATOR
           for dir in $PATH; do
             IFS=$ovs_save_IFS
@@ -397,7 +401,7 @@ else:
         done
       fi])
    if test "$ovs_cv_python3" = no; then
-     AC_MSG_ERROR([Python 3.4 or later is required but not found in $PATH, please install it or set $PYTHON3 to point to it])
+     AC_MSG_ERROR([Python 3.6 or later is required but not found in $PATH, please install it or set $PYTHON3 to point to it])
    fi
    AC_ARG_VAR([PYTHON3])
    PYTHON3=$ovs_cv_python3])
@@ -421,6 +425,64 @@ AC_DEFUN([OVS_CHECK_SPHINX],
    AC_ARG_VAR([SPHINXBUILD])
    AM_CONDITIONAL([HAVE_SPHINX], [test "$SPHINXBUILD" != none])])
 
+
+dnl Checks for compiler correctly emitting AVX512-VL vpermd instruction.
+dnl GCC5 says it exports AVX512-VL, but it doesn't implement "vpermd" instruction
+dnl resulting in compilation failures. To workaround this "reported vs actual"
+dnl mismatch, we compile a small snippet, and conditionally enable AVX512-VL.
+AC_DEFUN([OVS_CHECK_GCC_AVX512VL], [
+  AC_MSG_CHECKING([whether compiler correctly emits AVX512-VL])
+  AC_COMPILE_IFELSE(
+    [AC_LANG_PROGRAM([#include <immintrin.h>
+                     static void __attribute__((__target__("avx512vl")))
+                     check_permutexvar(void)
+                     {
+                         __m256i v_swap32a = _mm256_setr_epi32(0x0, 0x4, 0xF,
+                                                               0xF, 0xF, 0xF,
+                                                               0xF, 0xF);
+                         v_swap32a = _mm256_permutexvar_epi32(v_swap32a,
+                                                              v_swap32a);
+                     }],[])],
+    [AC_MSG_RESULT([yes])
+    ovs_cv_gcc_avx512vl_good=yes],
+    [AC_MSG_RESULT([no])
+    ovs_cv_gcc_avx512vl_good=no])
+   if test "$ovs_cv_gcc_avx512vl_good" = yes; then
+     AC_DEFINE([HAVE_GCC_AVX512VL_GOOD], [1],
+               [Define to 1 if gcc implements the vpermd instruction.])
+   fi
+   AM_CONDITIONAL([HAVE_GCC_AVX512VL_GOOD],
+                  [test "$ovs_cv_gcc_avx512vl_good" = yes])])
+
+dnl Checks whether the build system implements the vpopcntdq instruction. The
+dnl compiler and assembler each separately need to support vpopcntdq. In order
+dnl to test the assembler with the below code snippet, set the optimization
+dnl level of the function to "O0" so it won't be optimized away by the
+dnl compiler.
+AC_DEFUN([OVS_CHECK_AVX512VPOPCNTDQ], [
+  AC_MSG_CHECKING([whether compiler correctly emits AVX512-VPOPCNTDQ])
+  AC_COMPILE_IFELSE(
+    [AC_LANG_PROGRAM([#include <immintrin.h>
+                     void
+                     __attribute__((__target__("avx512vpopcntdq")))
+                     __attribute__((optimize("O0")))
+                     check_vpopcntdq(void)
+                     {
+                         __m512i v_test;
+                         v_test = _mm512_popcnt_epi64(v_test);
+                     }],[])],
+    [AC_MSG_RESULT([yes])
+    ovs_cv_avx512vpopcntdq_good=yes],
+    [AC_MSG_RESULT([no])
+    ovs_cv_avx512vpopcntdq_good=no])
+   if test "$ovs_cv_avx512vpopcntdq_good" = yes; then
+     AC_DEFINE([HAVE_AVX512VPOPCNTDQ], [1],
+               [Define to 1 if the build system implements the vpopcntdq
+                instruction.])
+   fi
+   AM_CONDITIONAL([HAVE_AVX512VPOPCNTDQ],
+                  [test "$ovs_cv_avx512vpopcntdq_good" = yes])])
+
 dnl Checks for binutils/assembler known issue with AVX512.
 dnl Due to backports, we probe assembling a reproducer instead of checking
 dnl binutils version string. More details, including ASM dumps and debug here:
@@ -436,8 +498,8 @@ AC_DEFUN([OVS_CHECK_BINUTILS_AVX512],
      mkdir -p build-aux
      OBJFILE=build-aux/binutils_avx512_check.o
      GATHER_PARAMS='0x8(,%ymm1,1),%ymm0{%k2}'
-     echo "vpgatherqq $GATHER_PARAMS" | as --64 -o $OBJFILE -
      if ($CC -dumpmachine | grep x86_64) >/dev/null 2>&1; then
+       echo "vpgatherqq $GATHER_PARAMS" | as --64 -o $OBJFILE -
        if (objdump -d  --no-show-raw-insn $OBJFILE | grep -q $GATHER_PARAMS) >/dev/null 2>&1; then
          ovs_cv_binutils_avx512_good=yes
        else
@@ -446,11 +508,11 @@ AC_DEFUN([OVS_CHECK_BINUTILS_AVX512],
          dnl and causing zmm usage with buggy binutils versions.
          CFLAGS="$CFLAGS -mno-avx512f"
        fi
+       rm $OBJFILE
      else
        dnl non x86_64 architectures don't have avx512, so not affected
        ovs_cv_binutils_avx512_good=no
      fi])
-     rm $OBJFILE
    if test "$ovs_cv_binutils_avx512_good" = yes; then
      AC_DEFINE([HAVE_LD_AVX512_GOOD], [1],
                [Define to 1 if binutils correctly supports AVX512.])

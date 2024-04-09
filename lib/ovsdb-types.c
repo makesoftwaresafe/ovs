@@ -189,8 +189,7 @@ ovsdb_base_type_clone(struct ovsdb_base_type *dst,
 
     if (src->enum_) {
         dst->enum_ = xmalloc(sizeof *dst->enum_);
-        ovsdb_datum_clone(dst->enum_, src->enum_,
-                          ovsdb_base_type_get_enum_type(dst->type));
+        ovsdb_datum_clone(dst->enum_, src->enum_);
     }
 
     switch (dst->type) {
@@ -273,6 +272,58 @@ ovsdb_base_type_is_valid(const struct ovsdb_base_type *base)
     case OVSDB_N_TYPES:
     default:
         return false;
+    }
+}
+
+bool
+ovsdb_base_type_equals(const struct ovsdb_base_type *a,
+                       const struct ovsdb_base_type *b)
+{
+    if (a == b) {
+        return true;
+    }
+
+    if (a->type != b->type) {
+        return false;
+    }
+
+    if ((a->enum_ && !b->enum_) || (!a->enum_ && b->enum_)) {
+        return false;
+    } else if (a->enum_ &&
+               !ovsdb_datum_equals(a->enum_, b->enum_,
+                                   ovsdb_base_type_get_enum_type(a->type))) {
+        return false;
+    }
+
+    switch (a->type) {
+    case OVSDB_TYPE_VOID:
+        return true;
+
+    case OVSDB_TYPE_INTEGER:
+        return a->integer.min == b->integer.min
+               && a->integer.max == b->integer.max;
+
+    case OVSDB_TYPE_REAL:
+        return a->real.min == b->real.min && a->real.max == b->real.max;
+
+    case OVSDB_TYPE_BOOLEAN:
+        return true;
+
+    case OVSDB_TYPE_STRING:
+        return a->string.minLen == b->string.minLen
+               && a->string.maxLen == b->string.maxLen;
+
+    case OVSDB_TYPE_UUID:
+        /* Not comparing the table pointer here, only the table name, as this
+         * function can be used to compare types from different databases, so
+         * pointers will be different. */
+        return a->uuid.refType == b->uuid.refType
+               && nullable_string_is_equal(a->uuid.refTableName,
+                                           b->uuid.refTableName);
+
+    case OVSDB_N_TYPES:
+    default:
+        OVS_NOT_REACHED();
     }
 }
 
@@ -567,6 +618,15 @@ ovsdb_type_is_valid(const struct ovsdb_type *type)
             && ovsdb_base_type_is_valid(&type->value)
             && type->n_min <= 1
             && type->n_max >= 1);
+}
+
+bool
+ovsdb_type_equals(const struct ovsdb_type *a, const struct ovsdb_type *b)
+{
+    return ovsdb_base_type_equals(&a->key, &b->key)
+           && ovsdb_base_type_equals(&a->value, &b->value)
+           && a->n_min == b->n_min
+           && a->n_max == b->n_max;
 }
 
 static struct ovsdb_error *

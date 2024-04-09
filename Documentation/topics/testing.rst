@@ -343,17 +343,22 @@ To see a list of all the available tests, run::
 
 These tests support a `DPDK supported NIC`_. The tests operate on a wider set of
 environments, for instance, when a virtual port is used.
-They do require proper DPDK variables (``DPDK_DIR`` and ``DPDK_BUILD``).
 Moreover you need to have root privileges to load the required modules and to bind
-the NIC to the DPDK-compatible driver.
+a PCI device to the DPDK-compatible driver.
 
 .. _DPDK supported NIC: https://core.dpdk.org/supported/#nics
 
+The phy test will skip if no suitable PCI device is found.
+It is possible to select which PCI device is used for this test by setting the
+DPDK_PCI_ADDR environment variable, which is especially useful when testing
+with a mlx5 device::
+
+    # DPDK_PCI_ADDR=0000:82:00.0 make check-dpdk
+
 All tests are skipped if no hugepages are configured. User must look into the DPDK
 manual to figure out how to `Configure hugepages`_.
-The phy test will skip if no compatible physical device is available.
 
-.. _Configure hugepages: https://doc.dpdk.org/guides-21.11/linux_gsg/sys_reqs.html
+.. _Configure hugepages: https://doc.dpdk.org/guides-23.11/linux_gsg/sys_reqs.html
 
 All the features documented under `Unit Tests`_ are available for the DPDK
 testsuite.
@@ -361,12 +366,12 @@ testsuite.
 Userspace datapath: Testing and Validation of CPU-specific Optimizations
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-As multiple versions of the datapath classifier and packet parsing functions
-can co-exist, each with different CPU ISA optimizations, it is important to
-validate that they all give the exact same results.  To easily test all the
-implementations, an ``autovalidator`` implementation of them exists.  This
-implementation runs all other available implementations, and verifies that the
-results are identical.
+As multiple versions of the datapath classifier, packet parsing functions and
+actions can co-exist, each with different CPU ISA optimizations, it is
+important to validate that they all give the exact same results.  To easily
+test all the implementations, an ``autovalidator`` implementation of them
+exists. This implementation runs all other available implementations, and
+verifies that the results are identical.
 
 Running the OVS unit tests with the autovalidator enabled ensures all
 implementations provide the same results.  Note that the performance of the
@@ -382,21 +387,29 @@ To set the autovalidator for the packet parser, use this command::
 
     $ ovs-appctl dpif-netdev/miniflow-parser-set autovalidator
 
+To set the autovalidator for actions, use this command::
+
+    $ ovs-appctl odp-execute/action-impl-set autovalidator
+
 To run the OVS unit test suite with the autovalidator as the default
 implementation, it is required to recompile OVS.  During the recompilation,
 the default priority of the `autovalidator` implementation is set to the
-maximum priority, ensuring every test will be run with every implementation::
+maximum priority, ensuring every test will be run with every implementation.
+Priority is only related to mfex autovalidator and not the actions
+autovalidator.::
 
-    $ ./configure --enable-autovalidator --enable-mfex-default-autovalidator
+    $ ./configure --enable-autovalidator --enable-mfex-default-autovalidator \
+        --enable-actions-default-autovalidator
 
 The following line should be seen in the configuration log when the above
 options are used::
 
     checking whether DPCLS Autovalidator is default implementation... yes
     checking whether MFEX Autovalidator is default implementation... yes
+    checking whether actions Autovalidator is default implementation... yes
 
 Compile OVS in debug mode to have `ovs_assert` statements error out if
-there is a mis-match in the datapath classifier lookup or packet parser
+there is a mismatch in the datapath classifier lookup or packet parser
 implementations.
 
 Since the AVX512 implementation of the datapath interface is disabled by
@@ -428,13 +441,6 @@ your system, run::
 
     $ make check-kernel
 
-To install the kernel module from the current build directory and run the
-testsuite against that kernel module::
-
-    $ make check-kmod
-
-The results of the testsuite are in ``tests/system-kmod-testsuite.dir``.
-
 All the features documented under `Unit Tests`_ are available for the kernel
 datapath testsuite.
 
@@ -447,7 +453,7 @@ datapath testsuite.
   an updated iproute2 utilities package.  The package is available from
   the Linux kernel organization open source git repositories.
 
-  https://git.kernel.org/pub/scm/linux/kernel/git/shemminger/iproute2.git
+  https://git.kernel.org/pub/scm/network/iproute2/iproute2.git
 
 .. _testing-static-analysis:
 
@@ -473,60 +479,21 @@ You should invoke scan-view to view analysis results. The last line of output
 from ``clang-analyze`` will list the command (containing results directory)
 that you should invoke to view the results on a browser.
 
-Continuous Integration with Travis CI
--------------------------------------
+ViNePerf
+--------
 
-A .travis.yml file is provided to automatically build Open vSwitch with various
-build configurations and run the testsuite using Travis CI. Builds will be
-performed with gcc, sparse and clang with the -Werror compiler flag included,
-therefore the build will fail if a new warning has been introduced.
+The ViNePerf project, formerly known as VswitchPerf or vsperf, aims to
+develop a vSwitch test framework that can be used to validate the
+suitability of different vSwitch implementations in a telco deployment
+environment. More information can be found on the `Anuket project wiki`_.
 
-The CI build is triggered via git push (regardless of the specific branch) or
-pull request against any Open vSwitch GitHub repository that is linked to
-travis-ci.
-
-Instructions to setup travis-ci for your GitHub repository:
-
-1. Go to https://travis-ci.org/ and sign in using your GitHub ID.
-2. Go to the "Repositories" tab and enable the ovs repository. You may disable
-   builds for pushes or pull requests.
-3. In order to avoid forks sending build failures to the upstream mailing list,
-   the notification email recipient is encrypted. If you want to receive email
-   notification for build failures, replace the encrypted string:
-
-   1. Install the travis-ci CLI (Requires ruby >=2.0): gem install travis
-   2. In your Open vSwitch repository: travis encrypt mylist@mydomain.org
-   3. Add/replace the notifications section in .travis.yml and fill in the
-      secure string as returned by travis encrypt::
-
-          notifications:
-            email:
-              recipients:
-                - secure: "....."
-
-  .. note::
-    You may remove/omit the notifications section to fall back to default
-    notification behaviour which is to send an email directly to the author and
-    committer of the failing commit. Note that the email is only sent if the
-    author/committer have commit rights for the particular GitHub repository.
-
-4. Pushing a commit to the repository which breaks the build or the
-   testsuite will now trigger a email sent to mylist@mydomain.org
-
-vsperf
-------
-
-The vsperf project aims to develop a vSwitch test framework that can be used to
-validate the suitability of different vSwitch implementations in a telco
-deployment environment. More information can be found on the `OPNFV wiki`_.
-
-.. _OPNFV wiki: https://wiki.opnfv.org/display/vsperf/VSperf+Home
+.. _Anuket project wiki: https://wiki.anuket.io/display/HOME/ViNePERF
 
 Proof of Concepts
 ~~~~~~~~~~~~~~~~~
 
 Proof of Concepts are documentation materialized into Ansible recipes
-executed in VirtualBox or Libvirt environments orchastrated by Vagrant.
+executed in VirtualBox or Libvirt environments orchestrated by Vagrant.
 Proof of Concepts allow developers to create small virtualized setups that
 demonstrate how certain Open vSwitch features are intended to work avoiding
 user introduced errors by overlooking instructions.  Proof of Concepts

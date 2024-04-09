@@ -92,7 +92,7 @@ Once that is completed, remove the file ``/tmp/ovs.spec``.
 If python3-sphinx package is not available in your version of RHEL, you can
 install it via pip with 'pip install sphinx'.
 
-Open vSwitch requires python 3.4 or newer which is not available in older
+Open vSwitch requires python 3.6 or newer which is not available in older
 distributions. In the case of RHEL 6.x and its derivatives, one option is
 to install python34 from `EPEL`_.
 
@@ -193,24 +193,6 @@ the unit tests, run::
    If the build fails with ``configure: error: source dir
    /lib/modules/2.6.32-279.el6.x86_64/build doesn't exist`` or similar, then
    the kernel-devel package is missing or buggy.
-
-Kernel Module
-~~~~~~~~~~~~~
-
-On RHEL 6, to build the Open vSwitch kernel module run::
-
-    $ rpmbuild -bb rhel/kmod-openvswitch-rhel6.spec
-
-You might have to specify a kernel version and/or variants, e.g.::
-
-    $ rpmbuild -bb \
-        -D "kversion 2.6.32-131.6.1.el6.x86_64" \
-        -D "kflavors default debug kdump" \
-        rhel/kmod-openvswitch-rhel6.spec
-
-This produces an "kmod-openvswitch" RPM for each kernel variant, in this
-example: "kmod-openvswitch", "kmod-openvswitch-debug", and
-"kmod-openvswitch-kdump".
 
 .. _rhel-script-integrations:
 

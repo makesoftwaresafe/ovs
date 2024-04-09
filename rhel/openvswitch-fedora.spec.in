@@ -17,9 +17,7 @@
 # These tests can be executed, for example, via:
 #    rpmbuild -rb --with check_datapath_kernel openvswitch-fedora.src.rpm
 #
-# These tests will use the currently installed OVS kernel modules, when
-# testing out of tree kernel modules the appropriate openvswitch-kmod
-# package should be installed first.
+# These tests will use the currently installed OVS kernel modules.
 
 #%define kernel 2.6.40.4-5.fc15.x86_64
 
@@ -28,8 +26,10 @@
 %bcond_without libcapng
 # To enable DPDK support, specify '--with dpdk' when building
 %bcond_with dpdk
-# To enable AF_XDP support, specify '--with afxdp' when building
-%bcond_with afxdp
+# To disable AF_XDP support, specify '--without afxdp' when building
+%bcond_without afxdp
+# To control the USDT support
+%bcond_without usdt
 
 # If there is a need to automatically enable the package after installation,
 # specify the "--with autoenable"
@@ -54,7 +54,6 @@ Version: @VERSION@
 
 # Nearly all of openvswitch is ASL 2.0.  The bugtool is LGPLv2+, and the
 # lib/sflow*.[ch] files are SISSL
-# datapath/ is GPLv2 (although not built into any of the binary packages)
 License: ASL 2.0 and LGPLv2+ and SISSL
 Release: %{release_number}%{?dist}
 Source: http://openvswitch.org/releases/%{name}-%{version}.tar.gz
@@ -74,11 +73,14 @@ BuildRequires: libcap-ng libcap-ng-devel
 %endif
 %if %{with dpdk}
 BuildRequires: libpcap-devel numactl-devel
-BuildRequires: dpdk-devel >= 21.11
+BuildRequires: dpdk-devel >= 23.11
 Provides: %{name}-dpdk = %{version}-%{release}
 %endif
 %if %{with afxdp}
-BuildRequires: libbpf-devel numactl-devel
+BuildRequires: libxdp-devel libbpf-devel numactl-devel
+%endif
+%if %{with usdt}
+BuildRequires: libbpf-devel systemtap-sdt-devel
 %endif
 BuildRequires: unbound unbound-devel
 
@@ -116,6 +118,7 @@ Summary: Open vSwitch python3 bindings
 License: ASL 2.0
 BuildArch: noarch
 Requires: python3
+Suggests: python3-netaddr python3-pyparsing python3-unbound
 %{?python_provide:%python_provide python3-openvswitch = %{version}-%{release}}
 
 %description -n python3-openvswitch
@@ -173,6 +176,11 @@ This package provides IPsec tunneling support for OVS tunnels.
 %endif
 %if %{with afxdp}
         --enable-afxdp \
+%else
+        --disable-afxdp \
+%endif
+%if %{with usdt}
+        --enable-usdt-probes \
 %endif
         --enable-ssl \
         --disable-static \
@@ -199,20 +207,6 @@ make install DESTDIR=$RPM_BUILD_ROOT
 install -d -m 0755 $RPM_BUILD_ROOT%{_rundir}/openvswitch
 install -d -m 0750 $RPM_BUILD_ROOT%{_localstatedir}/log/openvswitch
 install -d -m 0755 $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch
-copy_headers() {
-    src=$1
-    dst=$RPM_BUILD_ROOT/$2
-    install -d -m 0755 $dst
-    install -m 0644 $src/*.h $dst
-}
-copy_headers include %{_includedir}/openvswitch
-copy_headers include/openflow %{_includedir}/openvswitch/openflow
-copy_headers include/openvswitch %{_includedir}/openvswitch/openvswitch
-copy_headers include/sparse %{_includedir}/openvswitch/sparse
-copy_headers include/sparse/arpa %{_includedir}/openvswitch/sparse/arpa
-copy_headers include/sparse/netinet %{_includedir}/openvswitch/sparse/netinet
-copy_headers include/sparse/sys %{_includedir}/openvswitch/sparse/sys
-copy_headers lib %{_includedir}/openvswitch/lib
 
 %if %{with dpdk}
 install -p -D -m 0644 rhel/usr_lib_udev_rules.d_91-vfio.rules \
@@ -254,8 +248,6 @@ rm -rf $RPM_BUILD_ROOT/%{_datadir}/openvswitch/python/
 
 install -d -m 0755 $RPM_BUILD_ROOT/%{_sharedstatedir}/openvswitch
 
-touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/conf.db
-touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/.conf.db.~lock~
 touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/system-id.conf
 
 install -p -m 644 -D selinux/openvswitch-custom.pp \
@@ -344,6 +336,21 @@ if [ $1 -eq 1 ]; then
 fi
 %endif
 
+# Ensure that /etc/openvswitch/conf.db links to /var/lib/openvswitch,
+# moving an existing file if there is one.
+#
+# Ditto for .conf.db.~lock~.
+for base in conf.db .conf.db.~lock~; do
+    new=/var/lib/openvswitch/$base
+    old=/etc/openvswitch/$base
+    if test -f $old && test ! -e $new; then
+        mv $old $new
+    fi
+    if test ! -e $old && test ! -h $old; then
+        ln -s $new $old
+    fi
+done
+
 %if 0%{?systemd_post:1}
     # This may not enable openvswitch service or do daemon-reload.
     %systemd_post %{name}.service
@@ -399,6 +406,7 @@ fi
 %{_bindir}/ovs-pcap
 %{_bindir}/ovs-tcpdump
 %{_bindir}/ovs-tcpundump
+%{_datadir}/openvswitch/scripts/usdt/*
 %{_mandir}/man8/ovs-test.8*
 %{_mandir}/man8/ovs-vlan-test.8*
 %{_mandir}/man8/ovs-l3ping.8*
@@ -429,8 +437,8 @@ fi
 %endif
 %dir %{_sysconfdir}/openvswitch
 %{_sysconfdir}/openvswitch/default.conf
-%config %ghost %{_sysconfdir}/openvswitch/conf.db
-%ghost %{_sysconfdir}/openvswitch/.conf.db.~lock~
+%config %ghost %{_sharedstatedir}/openvswitch/conf.db
+%ghost %{_sharedstatedir}/openvswitch/.conf.db.~lock~
 %config %ghost %{_sysconfdir}/openvswitch/system-id.conf
 %config(noreplace) %{_sysconfdir}/sysconfig/openvswitch
 %defattr(-,root,root)
@@ -455,6 +463,7 @@ fi
 %{_datadir}/openvswitch/scripts/ovs-ctl
 %{_datadir}/openvswitch/scripts/ovs-kmod-ctl
 %{_datadir}/openvswitch/scripts/ovs-systemd-reload
+%config %{_datadir}/openvswitch/local-config.ovsschema
 %config %{_datadir}/openvswitch/vswitch.ovsschema
 %config %{_datadir}/openvswitch/vtep.ovsschema
 %{_bindir}/ovs-appctl
@@ -476,6 +485,7 @@ fi
 %{_mandir}/man1/ovsdb-server.1*
 %{_mandir}/man1/ovsdb-tool.1*
 %{_mandir}/man5/ovsdb-server.5*
+%{_mandir}/man5/ovsdb.local-config.5*
 %{_mandir}/man5/ovs-vswitchd.conf.db.5*
 %{_mandir}/man5/ovsdb.5*
 %{_mandir}/man5/vtep.5*
@@ -500,7 +510,11 @@ fi
 %{_prefix}/lib/udev/rules.d/91-vfio.rules
 %endif
 %doc NOTICE README.rst NEWS rhel/README.RHEL.rst
-/var/lib/openvswitch
+%if %{with dpdk}
+%attr(750,openvswitch,hugetlbfs) /var/lib/openvswitch
+%else
+%attr(750,openvswitch,openvswitch) /var/lib/openvswitch
+%endif
 %attr(750,root,root) /var/log/openvswitch
 %ghost %attr(755,root,root) %{_rundir}/openvswitch
 %ghost %attr(644,root,root) %{_rundir}/openvswitch.useropts
